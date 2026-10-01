@@ -1,303 +1,984 @@
 #include <iostream>
+#include <array>
 #include <vector>
-#include <cmath>
-#include <cstdlib>
-#include <ctime>
-#include <algorithm>
 #include <memory>
+#include <cmath>
+#include <random>
+#include <limits>
+#include <algorithm>
 
 using namespace std;
 
-const int BOARD_SIZE = 9;
-const int MAX_CELLS = BOARD_SIZE * BOARD_SIZE;
-const int EMPTY = 0;
-const int BLACK = 1;
-const int WHITE = 2;
+// ============================================================
+// 기본 설정
+// ============================================================
 
-// 상하좌우 방향 벡터
-const int dr[] = {-1, 1, 0, 0};
-const int dc[] = {0, 0, -1, 1};
+constexpr int BOARD_SIZE = 9;
+constexpr int MAX_CELLS = BOARD_SIZE * BOARD_SIZE;
+
+constexpr int EMPTY = 0;
+constexpr int BLACK = 1;
+constexpr int WHITE = 2;
+constexpr int DRAW = 3;
+
+// 상하좌우
+constexpr int DR[4] = {-1, 1, 0, 0};
+constexpr int DC[4] = {0, 0, -1, 1};
+
+
+// ============================================================
+// 좌표 관련 함수
+// ============================================================
+
+inline bool in_board(int r, int c) {
+    return r >= 0 &&
+           r < BOARD_SIZE &&
+           c >= 0 &&
+           c < BOARD_SIZE;
+}
+
+inline int to_index(int r, int c) {
+    return r * BOARD_SIZE + c;
+}
+
+inline int get_opponent(int player) {
+    return (player == BLACK) ? WHITE : BLACK;
+}
+
+
+// ============================================================
+// GameState
+// ============================================================
 
 class GameState {
 public:
-    vector<int> board;
-    int current_player;
-    int winner; // 0: 진행중, 1: 흑 승, 2: 백 승, 3: 무승부(집 계산)
+
+    // 9x9 = 81칸
+    array<int, MAX_CELLS> board{};
+
+    // 현재 차례
+    int current_player = BLACK;
+
+    // 0 : 진행 중
+    // 1 : 흑 승
+    // 2 : 백 승
+    // 3 : 무승부
+    int winner = EMPTY;
+
 
     GameState() {
-        board = vector<int>(MAX_CELLS, EMPTY);
-        current_player = BLACK;
-        winner = 0;
+        board.fill(EMPTY);
     }
 
-    // 적 상대에게 완전히 변경(반전)되는 플레이어 반환
-    int get_opponent() const {
-        return (current_player == BLACK) ? WHITE : BLACK;
-    }
 
-    // 특정 돌 그룹이 숨 쉴 곳(자유도)이 있는지 판별 (Flood Fill)
-    bool has_liberties(int start_idx, int player) const {
-        vector<bool> visited(MAX_CELLS, false);
+    // --------------------------------------------------------
+    // 특정 돌 그룹 전체 찾기
+    // --------------------------------------------------------
+
+    vector<int> get_group(int start_idx, int player) const {
+
+        vector<int> group;
+
+        if (start_idx < 0 ||
+            start_idx >= MAX_CELLS ||
+            board[start_idx] != player) {
+            return group;
+        }
+
+        array<bool, MAX_CELLS> visited{};
+
         vector<int> stack;
-        
         stack.push_back(start_idx);
+
         visited[start_idx] = true;
 
         while (!stack.empty()) {
-            int curr = stack.back();
+
+            int current = stack.back();
             stack.pop_back();
 
-            int r = curr / BOARD_SIZE;
-            int c = curr % BOARD_SIZE;
+            group.push_back(current);
 
-            for (int i = 0; i < 4; ++i) {
-                int nr = r + dr[i];
-                int nc = c + dc[i];
-                
-                if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
-                    int n_idx = nr * BOARD_SIZE + nc;
-                    if (board[n_idx] == EMPTY) {
-                        return true; // 빈 공간이 하나라도 있으면 생존
-                    }
-                    if (board[n_idx] == player && !visited[n_idx]) {
-                        visited[n_idx] = true;
-                        stack.push_back(n_idx);
-                    }
+            int r = current / BOARD_SIZE;
+            int c = current % BOARD_SIZE;
+
+            for (int d = 0; d < 4; d++) {
+
+                int nr = r + DR[d];
+                int nc = c + DC[d];
+
+                if (!in_board(nr, nc))
+                    continue;
+
+                int next = to_index(nr, nc);
+
+                if (board[next] == player &&
+                    !visited[next]) {
+
+                    visited[next] = true;
+                    stack.push_back(next);
                 }
             }
         }
-        return false; // 빈 공간이 전혀 없음 (둘러싸임)
+
+        return group;
     }
 
-    // 완벽한 집(진짜 눈, Eye)인지 확인하여 착수 금지 구역으로 설정
-    bool is_eye(int idx, int player) const {
-        int r = idx / BOARD_SIZE;
-        int c = idx % BOARD_SIZE;
-        
-        for (int i = 0; i < 4; ++i) {
-            int nr = r + dr[i];
-            int nc = c + dc[i];
-            if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
-                int n_idx = nr * BOARD_SIZE + nc;
-                if (board[n_idx] != player) return false;
+
+    // --------------------------------------------------------
+    // 돌 그룹에 자유도가 있는가?
+    // --------------------------------------------------------
+
+    bool has_liberties(int start_idx, int player) const {
+
+        if (board[start_idx] != player)
+            return false;
+
+        array<bool, MAX_CELLS> visited{};
+
+        vector<int> stack;
+        stack.push_back(start_idx);
+
+        visited[start_idx] = true;
+
+        while (!stack.empty()) {
+
+            int current = stack.back();
+            stack.pop_back();
+
+            int r = current / BOARD_SIZE;
+            int c = current % BOARD_SIZE;
+
+            for (int d = 0; d < 4; d++) {
+
+                int nr = r + DR[d];
+                int nc = c + DC[d];
+
+                if (!in_board(nr, nc))
+                    continue;
+
+                int next = to_index(nr, nc);
+
+                // 빈 공간 발견
+                if (board[next] == EMPTY) {
+                    return true;
+                }
+
+                // 같은 그룹
+                if (board[next] == player &&
+                    !visited[next]) {
+
+                    visited[next] = true;
+                    stack.push_back(next);
+                }
             }
         }
-        return true; // 상하좌우가 모두 내 돌이거나 벽인 경우
+
+        // 자유도가 전혀 없음
+        return false;
     }
 
-    // 현재 상태에서 둘 수 있는 모든 합법적인 수 반환
+
+    // --------------------------------------------------------
+    // 해당 빈칸이 집인가?
+    //
+    // 정의:
+    // 해당 빈칸의 상하좌우가
+    // 모두 같은 플레이어의 돌 또는 보드 경계이면 집
+    //
+    // 예:
+    //
+    // X X
+    // X .
+    //
+    // 오른쪽 아래 '.'은 BLACK의 집
+    // --------------------------------------------------------
+
+    bool is_house_cell(int cell, int player) const {
+
+        if (cell < 0 ||
+            cell >= MAX_CELLS ||
+            board[cell] != EMPTY) {
+            return false;
+        }
+
+        int r = cell / BOARD_SIZE;
+        int c = cell % BOARD_SIZE;
+
+        for (int d = 0; d < 4; d++) {
+
+            int nr = r + DR[d];
+            int nc = c + DC[d];
+
+            // 보드 밖 = 벽
+            if (!in_board(nr, nc)) {
+                continue;
+            }
+
+            int next = to_index(nr, nc);
+
+            // 내부 칸인데 내 돌이 아니면 집이 아님
+            if (board[next] != player) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+
+    // --------------------------------------------------------
+    // 현재 보드의 모든 집을 계산
+    //
+    // house_owner[i]
+    //
+    // 0 = 집 아님
+    // 1 = 흑의 집
+    // 2 = 백의 집
+    // --------------------------------------------------------
+
+    array<int, MAX_CELLS> get_house_map() const {
+
+        array<int, MAX_CELLS> house_owner{};
+        house_owner.fill(EMPTY);
+
+        for (int i = 0; i < MAX_CELLS; i++) {
+
+            if (board[i] != EMPTY)
+                continue;
+
+            bool black_house = is_house_cell(i, BLACK);
+            bool white_house = is_house_cell(i, WHITE);
+
+            if (black_house) {
+                house_owner[i] = BLACK;
+            }
+            else if (white_house) {
+                house_owner[i] = WHITE;
+            }
+        }
+
+        return house_owner;
+    }
+
+
+    // --------------------------------------------------------
+    // 집 개수 계산
+    // --------------------------------------------------------
+
+    int count_house(int player) const {
+
+        auto house_map = get_house_map();
+
+        int count = 0;
+
+        for (int i = 0; i < MAX_CELLS; i++) {
+
+            if (house_map[i] == player) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+
+    // --------------------------------------------------------
+    // 최종 점수 계산
+    // --------------------------------------------------------
+
+    int calculate_winner() const {
+
+        int black_house = count_house(BLACK);
+        int white_house = count_house(WHITE);
+        // 백은 흑보다 2.5집의 추가점수를 갖는다.
+        white_house += 2;
+
+        if (black_house > white_house)
+            return BLACK;
+        return WHITE;
+    }
+
+
+    // --------------------------------------------------------
+    // 특정 착수가 상대 돌을 둘러싸는지 검사
+    // --------------------------------------------------------
+
+    bool captures_enemy(int move) const {
+
+        int opponent = get_opponent(current_player);
+
+        int r = move / BOARD_SIZE;
+        int c = move % BOARD_SIZE;
+
+        for (int d = 0; d < 4; d++) {
+
+            int nr = r + DR[d];
+            int nc = c + DC[d];
+
+            if (!in_board(nr, nc))
+                continue;
+
+            int next = to_index(nr, nc);
+
+            if (board[next] == opponent) {
+
+                // 상대 그룹의 자유도가 0이면
+                // 상대가 둘러싸임
+                if (!has_liberties(next, opponent)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+
+    // --------------------------------------------------------
+    // 착수 합법성 검사
+    // --------------------------------------------------------
+
+    bool is_legal_move(int move) const {
+
+        if (winner != EMPTY)
+            return false;
+
+        if (move < 0 || move >= MAX_CELLS)
+            return false;
+
+        // 이미 돌이 있음
+        if (board[move] != EMPTY)
+            return false;
+
+
+        // ----------------------------------------------------
+        // 집은 착수 금지
+        // ----------------------------------------------------
+
+        if (is_house_cell(move, BLACK) ||
+            is_house_cell(move, WHITE)) {
+
+            return false;
+        }
+
+
+        // ----------------------------------------------------
+        // 실제로 돌을 놓아 본다
+        // ----------------------------------------------------
+
+        GameState temp = *this;
+
+        temp.board[move] = current_player;
+
+
+        // 상대를 죽일 수 있다면 합법
+        if (temp.captures_enemy(move)) {
+            return true;
+        }
+
+
+        // ----------------------------------------------------
+        // 자기 돌이 자유도를 잃는 경우
+        // 자살수 -> 가지치기
+        // ----------------------------------------------------
+
+        if (!temp.has_liberties(move, current_player)) {
+            return false;
+        }
+
+        return true;
+    }
+
+
+    // --------------------------------------------------------
+    // 현재 가능한 모든 착수
+    // --------------------------------------------------------
+
     vector<int> get_legal_moves() const {
+
         vector<int> moves;
-        if (winner != 0) return moves; // 게임 종료 상태
 
-        for (int i = 0; i < MAX_CELLS; ++i) {
-            if (board[i] == EMPTY) {
-                // 1. 자신의 완벽한 집(Eye)에는 두지 않음 (가지치기 및 룰)
-                if (is_eye(i, current_player)) continue;
+        if (winner != EMPTY)
+            return moves;
 
-                // 2. 자살수 방지 (단, 놓아서 적을 죽이는 경우는 허용)
-                // 엔진 가속을 위해 딥 복사 대신 가상으로 놓아보고 검사
-                GameState temp_state = *this;
-                temp_state.board[i] = current_player;
-                
-                bool kills_enemy = false;
-                int r = i / BOARD_SIZE;
-                int c = i % BOARD_SIZE;
-                
-                for (int d = 0; d < 4; ++d) {
-                    int nr = r + dr[d];
-                    int nc = c + dc[d];
-                    if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
-                        int n_idx = nr * BOARD_SIZE + nc;
-                        if (temp_state.board[n_idx] == get_opponent()) {
-                            if (!temp_state.has_liberties(n_idx, get_opponent())) {
-                                kills_enemy = true;
-                                break;
-                            }
-                        }
-                    }
-                }
+        for (int i = 0; i < MAX_CELLS; i++) {
 
-                if (!kills_enemy && !temp_state.has_liberties(i, current_player)) {
-                    continue; // 적을 죽이지도 못하는데 내가 죽는 자리 (자살수)
-                }
-
+            if (is_legal_move(i)) {
                 moves.push_back(i);
             }
         }
+
         return moves;
     }
 
-    // 돌을 두고 승패를 판정하는 핵심 로직
-    void make_move(int move) {
-        board[move] = current_player;
-        int opponent = get_opponent();
-        bool enemy_died = false;
 
-        // 1. 적이 둘러싸였는지 (서든데스) 체크
-        int r = move / BOARD_SIZE;
-        int c = move % BOARD_SIZE;
-        for (int d = 0; d < 4; ++d) {
-            int nr = r + dr[d];
-            int nc = c + dc[d];
-            if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
-                int n_idx = nr * BOARD_SIZE + nc;
-                if (board[n_idx] == opponent && !has_liberties(n_idx, opponent)) {
-                    enemy_died = true;
-                    break;
-                }
-            }
+    // --------------------------------------------------------
+    // 실제 착수
+    //
+    // 반환:
+    // true  = 정상적으로 착수
+    // false = 불법 착수
+    // --------------------------------------------------------
+
+    bool make_move(int move) {
+
+        if (!is_legal_move(move))
+            return false;
+
+
+        int player = current_player;
+
+        // 돌 배치
+        board[move] = player;
+
+
+        // ----------------------------------------------------
+        // 상대를 둘러쌌다면 즉시 승리
+        // ----------------------------------------------------
+
+        if (captures_enemy(move)) {
+
+            winner = player;
+
+            return true;
         }
 
-        if (enemy_died) {
-            winner = current_player; // 적을 둘러쌌으므로 즉시 승리
-            return;
-        }
 
-        current_player = opponent; // 턴 넘기기
+        // 다음 플레이어
+        current_player = get_opponent(player);
+
+        return true;
     }
 
-    // 무작위 플레이아웃 (시뮬레이션)
-    int playout() {
+
+    // --------------------------------------------------------
+    // 더 이상 둘 수 없으면 집 계산
+    // --------------------------------------------------------
+
+    void check_game_end() {
+
+        if (winner != EMPTY)
+            return;
+
+        auto legal_moves = get_legal_moves();
+
+        if (legal_moves.empty()) {
+
+            winner = calculate_winner();
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // 무작위 플레이아웃
+    // --------------------------------------------------------
+
+    int random_playout(mt19937& rng,
+                       int max_turns = 200) const {
+
         GameState temp = *this;
-        int turn_limit = 150; // 무한 루프 방지
-        
-        while (temp.winner == 0 && turn_limit > 0) {
-            vector<int> moves = temp.get_legal_moves();
+
+        for (int turn = 0;
+             turn < max_turns && temp.winner == EMPTY;
+             turn++) {
+
+            vector<int> moves =
+                temp.get_legal_moves();
+
+
+            // 더 이상 둘 곳이 없음
             if (moves.empty()) {
-                break; // 양측 모두 둘 곳이 없으면 (영토 굳어짐) 종료
+
+                temp.winner =
+                    temp.calculate_winner();
+
+                break;
             }
-            int random_move = moves[rand() % moves.size()];
-            temp.make_move(random_move);
-            turn_limit--;
+
+
+            // 무작위 수 선택
+            uniform_int_distribution<int> dist(
+                0,
+                static_cast<int>(moves.size()) - 1
+            );
+
+            int move = moves[dist(rng)];
+
+            temp.make_move(move);
         }
 
-        // 서든데스로 승부가 안 났다면 집(돌 갯수) 카운팅
-        if (temp.winner == 0) {
-            int black_score = 0, white_score = 0;
-            for (int cell : temp.board) {
-                if (cell == BLACK) black_score++;
-                else if (cell == WHITE) white_score++;
-            }
-            if (black_score > white_score) temp.winner = BLACK;
-            else if (white_score > black_score) temp.winner = WHITE;
-            else temp.winner = 3; // 무승부
+
+        // 안전장치
+        if (temp.winner == EMPTY) {
+
+            temp.winner =
+                temp.calculate_winner();
         }
+
         return temp.winner;
+    }
+
+
+    // --------------------------------------------------------
+    // 디버깅용 보드 출력
+    //
+    // X = BLACK
+    // O = WHITE
+    // H = 집
+    // . = 빈칸
+    // --------------------------------------------------------
+
+    void print_board() const {
+
+        auto house_map = get_house_map();
+
+        cout << "\n   ";
+
+        for (int c = 0; c < BOARD_SIZE; c++) {
+            cout << c << ' ';
+        }
+
+        cout << '\n';
+
+
+        for (int r = 0; r < BOARD_SIZE; r++) {
+
+            cout << r << "  ";
+
+            for (int c = 0; c < BOARD_SIZE; c++) {
+
+                int cell = to_index(r, c);
+
+                char symbol = '.';
+
+                if (board[cell] == BLACK) {
+                    symbol = 'X';
+                }
+                else if (board[cell] == WHITE) {
+                    symbol = 'O';
+                }
+                else if (house_map[cell] == BLACK ||
+                         house_map[cell] == WHITE) {
+                    symbol = 'H';
+                }
+
+                cout << symbol << ' ';
+            }
+
+            cout << '\n';
+        }
+
+
+        cout << "\n현재 차례 : ";
+
+        if (current_player == BLACK)
+            cout << "BLACK";
+
+        else
+            cout << "WHITE";
+
+
+        cout << '\n';
+
+        cout << "BLACK 집 : "
+             << count_house(BLACK)
+             << '\n';
+
+        cout << "WHITE 집 : "
+             << count_house(WHITE)
+             << '\n';
     }
 };
 
-// MCTS 노드
+
+// ============================================================
+// MCTS Node
+// ============================================================
+
 class MCTSNode {
+
 public:
+
     GameState state;
+
     MCTSNode* parent;
+
     vector<unique_ptr<MCTSNode>> children;
-    int move_from_parent;
-    double wins;
-    int visits;
+
     vector<int> untried_moves;
 
-    MCTSNode(GameState s, MCTSNode* p, int move) : state(s), parent(p), move_from_parent(move), wins(0), visits(0) {
-        untried_moves = state.get_legal_moves();
+    // 이 노드로 오는 착수
+    int move_from_parent;
+
+    // 해당 노드의 방문 횟수
+    int visits;
+
+    // 승리 횟수
+    double wins;
+
+
+    MCTSNode(
+        const GameState& state,
+        MCTSNode* parent,
+        int move
+    )
+        : state(state),
+          parent(parent),
+          move_from_parent(move),
+          visits(0),
+          wins(0.0) {
+
+        untried_moves =
+            state.get_legal_moves();
     }
 
-    // UCB1 알고리즘을 이용한 자식 노드 선택
-    MCTSNode* uct_select_child() {
-        MCTSNode* best_child = nullptr;
-        double best_score = -1e9;
 
-        for (auto& child : children) {
-            double exploit = child->wins / child->visits;
-            double explore = sqrt(2.0 * log(visits) / child->visits);
-            double score = exploit + explore;
+    // --------------------------------------------------------
+    // 이 노드에서 '방금 수를 둔 사람'
+    // --------------------------------------------------------
+
+    int player_just_moved() const {
+
+        return get_opponent(state.current_player);
+    }
+
+
+    // --------------------------------------------------------
+    // UCT / UCB1
+    // --------------------------------------------------------
+
+    MCTSNode* select_child() {
+
+        MCTSNode* best_child = nullptr;
+
+        double best_score =
+            -numeric_limits<double>::infinity();
+
+
+        for (auto& child_ptr : children) {
+
+            MCTSNode* child =
+                child_ptr.get();
+
+
+            if (child->visits == 0) {
+                return child;
+            }
+
+
+            // exploitation
+            double exploitation =
+                child->wins /
+                static_cast<double>(child->visits);
+
+
+            // exploration
+            double exploration =
+                sqrt(
+                    2.0 *
+                    log(
+                        static_cast<double>(visits)
+                    ) /
+                    static_cast<double>(
+                        child->visits
+                    )
+                );
+
+
+            double score =
+                exploitation + exploration;
+
 
             if (score > best_score) {
+
                 best_score = score;
-                best_child = child.get();
+                best_child = child;
             }
         }
+
         return best_child;
     }
 
-    // 새로운 노드 확장
+
+    // --------------------------------------------------------
+    // Expansion
+    // --------------------------------------------------------
+
     MCTSNode* expand() {
+
+        if (untried_moves.empty()) {
+            return nullptr;
+        }
+
+
+        // 하나 꺼냄
         int move = untried_moves.back();
+
         untried_moves.pop_back();
 
-        GameState next_state = state;
-        next_state.make_move(move);
 
-        children.push_back(make_unique<MCTSNode>(next_state, this, move));
+        // 다음 상태 생성
+        GameState next_state = state;
+
+        bool success =
+            next_state.make_move(move);
+
+
+        if (!success) {
+            return nullptr;
+        }
+
+
+        children.push_back(
+            make_unique<MCTSNode>(
+                next_state,
+                this,
+                move
+            )
+        );
+
+
         return children.back().get();
     }
 
-    // 결과 역전파
-    void backpropagate(int result_winner) {
+
+    // --------------------------------------------------------
+    // Backpropagation
+    // --------------------------------------------------------
+
+    void backpropagate(int result) {
+
         visits++;
-        // 부모 노드의 플레이어 입장에서 이겼는지 확인
-        if (parent != nullptr) {
-            if (result_winner == parent->state.current_player) {
-                wins += 1.0;
-            } else if (result_winner == 3) {
-                wins += 0.5; // 무승부
-            }
+
+
+        int just_moved =
+            player_just_moved();
+
+
+        if (result == just_moved) {
+
+            wins += 1.0;
         }
+        else if (result == DRAW) {
+
+            wins += 0.5;
+        }
+
+
         if (parent != nullptr) {
-            parent->backpropagate(result_winner);
+
+            parent->backpropagate(result);
         }
     }
 };
 
-// MCTS 실행 함수
-int get_best_move(const GameState& root_state, int itermax) {
-    MCTSNode root(root_state, nullptr, -1);
 
-    for (int i = 0; i < itermax; ++i) {
-        MCTSNode* node = &root;
+// ============================================================
+// MCTS
+// ============================================================
 
-        // 1. Selection
-        while (node->untried_moves.empty() && !node->children.empty()) {
-            node = node->uct_select_child();
-        }
+class MCTS {
 
-        // 2. Expansion
-        if (!node->untried_moves.empty()) {
-            node = node->expand();
-        }
+private:
 
-        // 3. Simulation
-        int result = node->state.playout();
+    mt19937 rng;
 
-        // 4. Backpropagation
-        node->backpropagate(result);
+
+public:
+
+    MCTS()
+        : rng(random_device{}()) {
     }
 
-    // 방문 횟수가 가장 많은 수가 최적의 수
-    int best_move = -1;
-    int max_visits = -1;
-    for (auto& child : root.children) {
-        if (child->visits > max_visits) {
-            max_visits = child->visits;
-            best_move = child->move_from_parent;
+
+    // --------------------------------------------------------
+    // MCTS 검색
+    // --------------------------------------------------------
+
+    int search(
+        const GameState& root_state,
+        int iterations
+    ) {
+
+        MCTSNode root(
+            root_state,
+            nullptr,
+            -1
+        );
+
+
+        if (root.untried_moves.empty()) {
+            return -1;
         }
+
+
+        // ====================================================
+        // 반복
+        // ====================================================
+
+        for (int i = 0;
+             i < iterations;
+             i++) {
+
+            MCTSNode* node = &root;
+
+
+            // ------------------------------------------------
+            // 1. Selection
+            // ------------------------------------------------
+
+            while (
+                node->untried_moves.empty() &&
+                !node->children.empty()
+            ) {
+
+                node =
+                    node->select_child();
+            }
+
+
+            // ------------------------------------------------
+            // 2. Expansion
+            // ------------------------------------------------
+
+            if (!node->untried_moves.empty()) {
+
+                MCTSNode* expanded =
+                    node->expand();
+
+                if (expanded != nullptr) {
+                    node = expanded;
+                }
+            }
+
+
+            // ------------------------------------------------
+            // 3. Simulation
+            // ------------------------------------------------
+
+            int result =
+                node->state.random_playout(
+                    rng
+                );
+
+
+            // ------------------------------------------------
+            // 4. Backpropagation
+            // ------------------------------------------------
+
+            node->backpropagate(result);
+        }
+
+
+        // ====================================================
+        // 최종 선택
+        //
+        // 가장 많은 방문 횟수를 가진 착수 선택
+        // ====================================================
+
+        MCTSNode* best_child =
+            nullptr;
+
+        int max_visits = -1;
+
+
+        for (auto& child_ptr : root.children) {
+
+            MCTSNode* child =
+                child_ptr.get();
+
+
+            if (child->visits > max_visits) {
+
+                max_visits =
+                    child->visits;
+
+                best_child = child;
+            }
+        }
+
+
+        if (best_child == nullptr) {
+            return -1;
+        }
+
+
+        return best_child->move_from_parent;
     }
-    return best_move;
-}
+};
+
+
+// ============================================================
+// main
+// ============================================================
 
 int main() {
-    srand(time(NULL));
+
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+
+
     GameState game;
 
-    cout << "엔진 초기화 완료. AI 탐색을 시작합니다..." << endl;
+    MCTS mcts;
 
-    // AI가 흑(1)으로서 첫 수를 고민 (시뮬레이션 10,000번)
-    int best_move = get_best_move(game, 10000);
-    
-    int r = best_move / BOARD_SIZE;
-    int c = best_move % BOARD_SIZE;
-    
-    cout << "AI의 최적의 첫 수: (" << r << ", " << c << ")" << endl;
-    
+
+    cout << "====================================\n";
+    cout << "      9x9 Board Game Engine\n";
+    cout << "====================================\n";
+
+
+    game.print_board();
+
+
+    // --------------------------------------------------------
+    // AI 첫 수 계산
+    // --------------------------------------------------------
+
+    const int ITERATIONS = 10000;
+
+
+    cout << "\nMCTS "
+         << ITERATIONS
+         << "회 탐색 중...\n";
+
+
+    int best_move =
+        mcts.search(
+            game,
+            ITERATIONS
+        );
+
+
+    if (best_move == -1) {
+
+        cout << "둘 수 있는 곳이 없습니다.\n";
+
+        return 0;
+    }
+
+
+    int row =
+        best_move / BOARD_SIZE;
+
+    int col =
+        best_move % BOARD_SIZE;
+
+
+    cout << "\nAI 추천 수 : ("
+         << row
+         << ", "
+         << col
+         << ")\n";
+
+
+    // 실제 착수
+    game.make_move(best_move);
+
+
+    game.print_board();
+
+
     return 0;
 }
