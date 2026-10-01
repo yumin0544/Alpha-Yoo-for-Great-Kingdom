@@ -18,10 +18,17 @@ with MCTS and neural network self-play.
 
 ## Roadmap
 
-[x] Basic Engine
-[ ] Bitboard
-[ ] MCTS
-[ ] pybind11
-[ ] Neural Network
-[ ] Self Play
-[ ] LibTorch
+- [x] Record game rules and development plan
+- [ ] Basic Engine
+- [ ] Bitboard
+- [ ] Pure MCTS
+- [ ] pybind11
+- [ ] PyTorch Neural Network and Self Play
+- [ ] C++ / LibTorch Self Play
+
+## Project references
+
+- [Game rules and original examples (한국어)](docs/game_rules.md)
+- [Development plan (한국어)](docs/engine_design.md)
+
+The source files are currently placeholders. Listed features describe the planned scope.
