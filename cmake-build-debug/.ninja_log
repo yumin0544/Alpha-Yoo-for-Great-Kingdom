@@ -1,0 +1,7 @@
+# ninja log v5
+7	4311	8125916808536026	CMakeFiles/engine.dir/engine/src/Move.cpp.obj	eef1e03e519cd2e5
+48	4765	8125916813068207	CMakeFiles/engine.dir/engine/src/State.cpp.obj	be930f5b44bdbcd1
+85	5261	8125916817978642	CMakeFiles/engine.dir/engine/src/Board.cpp.obj	41ebc915e6310ca1
+5262	6337	8125916828791843	libengine.a	36a7bbb5cad16a04
+103	8575	8125916851151671	CMakeFiles/board_test.dir/tests/board_test.cpp.obj	cd4867291882f5de
+8577	9794	8125916862540993	board_test.exe	c2fa6f3884775b48
