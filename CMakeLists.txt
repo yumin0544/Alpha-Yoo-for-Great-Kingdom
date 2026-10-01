@@ -25,6 +25,25 @@ endfunction()
 
 enable_project_warnings(engine)
 
+add_library(mcts
+    mcts/src/Node.cpp
+    mcts/src/MCTS.cpp
+)
+target_link_libraries(mcts PUBLIC engine)
+target_include_directories(mcts PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mcts/include>"
+)
+set_target_properties(mcts PROPERTIES CXX_EXTENSIONS OFF)
+enable_project_warnings(mcts)
+
+add_executable(mcts_demo examples/mcts_demo.cpp)
+set_target_properties(mcts_demo PROPERTIES OUTPUT_NAME MCTSDemo)
+target_link_libraries(mcts_demo PRIVATE mcts)
+enable_project_warnings(mcts_demo)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(mcts_demo PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 add_executable(demo examples/main.cpp)
 target_link_libraries(demo PRIVATE engine)
 enable_project_warnings(demo)
@@ -46,6 +65,10 @@ if(BUILD_TESTING)
         enable_project_warnings(${test_name})
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
+    add_executable(mcts_test tests/mcts_test.cpp)
+    target_link_libraries(mcts_test PRIVATE mcts)
+    enable_project_warnings(mcts_test)
+    add_test(NAME mcts_test COMMAND mcts_test)
     add_test(NAME console_test COMMAND "${CMAKE_COMMAND}"
         "-DGAME_EXECUTABLE=$<TARGET_FILE:great_kingdom>"
         "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"

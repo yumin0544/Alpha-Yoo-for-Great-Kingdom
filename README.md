@@ -23,8 +23,10 @@ neutral stone at its center.
   [the engine design](docs/engine_design.md).
 - A playable console game for one user to control both players, an automated
   demo, and standalone tests without external dependencies.
+- Pure C++ MCTS with UCT selection, uniform random complete playouts,
+  configurable simulation/time budgets, and an AI-versus-AI demo.
 
-MCTS, Bitboard optimization, Python bindings, and neural network training are
+Bitboard optimization, Python bindings, and neural network training are
 the next development stages.
 
 ## Build and run
@@ -76,6 +78,30 @@ still runs an automated board and pass example: use `build/Release/demo.exe`
 for a multi-configuration Windows build, or `build/demo` for a
 single-configuration build.
 
+### MCTS로 추천 수 확인하기
+
+순수 MCTS는 기존 엔진의 규칙 판정을 호출한다. `engine/` 파일은 변경하지
+않았으며, 탐색 구현은 `mcts/`에 있다. 초기 보드의 선공 추천 수와 실제 측정한
+탐색 통계를 보려면 다음을 실행한다.
+
+```powershell
+.\build\MCTSDemo.exe
+.\build\MCTSDemo.exe 5000
+```
+
+기본값은 1000회 시뮬레이션이다. 양쪽 모두 AI로 종료까지 대국하려면
+`--self-play`를 사용한다. 이 모드의 기본값은 수마다 64회 시뮬레이션이다.
+
+```powershell
+.\build\MCTSDemo.exe --self-play
+.\build\MCTSDemo.exe --self-play 200
+```
+
+MSVC 등 다중 구성 빌드는 `build/Release/MCTSDemo.exe`에 실행파일을 생성한다.
+추천 좌표는 1부터 시작하는 행·열이며 패스는 `pass`다. 출력 승률은 무작위
+대국으로 얻은 추정치다. API와 알고리즘은 [MCTS 설계](docs/mcts_design.md)를
+참조한다. 기존 `GreatKingdom.exe`는 계속 사용자가 양쪽을 조작하는 대국이다.
+
 ## Basic API
 
 Public headers live in `engine/include/board`, in the `kingdom` namespace.
@@ -98,12 +124,28 @@ and reason after the game ends.
 `Board::to_string()` uses `x`, `o`, `v`, and `.` for Black, White, neutral,
 and empty cells respectively.
 
+Link the `mcts` target and include `MCTS.h` to request a search without changing
+the supplied game state:
+
+```cpp
+#include "MCTS.h"
+
+kingdom::State game;
+kingdom::MCTSOptions options;
+options.simulations = 1000;
+kingdom::MCTS searcher(options);
+const auto recommendation = searcher.search(game);
+if (recommendation.best_move) {
+    const auto outcome = game.play(*recommendation.best_move);
+}
+```
+
 ## Roadmap
 
 - [x] Record game rules and development plan
 - [x] Basic Engine
 - [ ] Bitboard
-- [ ] Pure MCTS
+- [x] Pure MCTS
 - [ ] pybind11
 - [ ] PyTorch Neural Network and Self Play
 - [ ] C++ / LibTorch Self Play
@@ -112,4 +154,5 @@ and empty cells respectively.
 
 - [Game rules and original examples (한국어)](docs/game_rules.md)
 - [Development plan and implementation choices (한국어)](docs/engine_design.md)
+- [Pure MCTS API and implementation (한국어)](docs/mcts_design.md)
 - [Online game](https://worldsstone.com)
