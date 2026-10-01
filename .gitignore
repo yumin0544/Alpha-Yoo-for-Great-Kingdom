@@ -1,0 +1,28 @@
+# Build
+build/
+
+# CLion
+.idea/
+
+# Visual Studio
+.vscode/
+
+# Executables
+*.exe
+*.out
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# Python
+__pycache__/
+*.pyc
+
+# Models
+*.pt
+*.pth
+
+# OS
+.DS_Store
