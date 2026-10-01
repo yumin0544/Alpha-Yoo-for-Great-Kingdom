@@ -20,6 +20,7 @@ constexpr int EMPTY = 0;
 constexpr int BLACK = 1;
 constexpr int WHITE = 2;
 constexpr int DRAW = 3;
+constexpr int PASS_MOVE = -1;
 
 // 상하좌우
 constexpr int DR[4] = {-1, 1, 0, 0};
@@ -64,6 +65,10 @@ public:
     // 2 : 백 승
     // 3 : 무승부
     int winner = EMPTY;
+
+    // 연속으로 패스한 횟수
+    int consecutive_passes = 0;
+
 
 
     GameState() {
@@ -285,17 +290,33 @@ public:
 
     // --------------------------------------------------------
     // 최종 점수 계산
+    //
+    // 흑 : 집
+    // 백 : 집 + 2.5
+    // --------------------------------------------------------
+
+    double get_black_score() const {
+        return static_cast<double>(count_house(BLACK));
+    }
+
+    double get_white_score() const {
+        return static_cast<double>(count_house(WHITE)) + 2.5;
+    }
+
+
+    // --------------------------------------------------------
+    // 최종 승자 계산
     // --------------------------------------------------------
 
     int calculate_winner() const {
 
-        int black_house = count_house(BLACK);
-        int white_house = count_house(WHITE);
-        // 백은 흑보다 2.5집의 추가점수를 갖는다.
-        white_house += 2;
+        double black_score = get_black_score();
+        double white_score = get_white_score();
 
-        if (black_house > white_house)
+        if (black_score > white_score) {
             return BLACK;
+        }
+
         return WHITE;
     }
 
@@ -392,7 +413,10 @@ public:
 
 
     // --------------------------------------------------------
-    // 현재 가능한 모든 착수
+    // 현재 가능한 모든 행동
+    //
+    // 0 ~ 80 : 돌 놓기
+    // -1     : 패스
     // --------------------------------------------------------
 
     vector<int> get_legal_moves() const {
@@ -402,6 +426,8 @@ public:
         if (winner != EMPTY)
             return moves;
 
+
+        // 일반 착수
         for (int i = 0; i < MAX_CELLS; i++) {
 
             if (is_legal_move(i)) {
@@ -409,19 +435,60 @@ public:
             }
         }
 
+
+        // 패스는 항상 가능
+        moves.push_back(PASS_MOVE);
+
         return moves;
     }
 
-
     // --------------------------------------------------------
-    // 실제 착수
+    // 행동 실행
     //
-    // 반환:
-    // true  = 정상적으로 착수
-    // false = 불법 착수
+    // move == PASS_MOVE
+    //     → 패스
+    //
+    // move == 0 ~ 80
+    //     → 돌 놓기
     // --------------------------------------------------------
 
     bool make_move(int move) {
+
+        if (winner != EMPTY)
+            return false;
+
+
+        // ====================================================
+        // 1. 패스
+        // ====================================================
+
+        if (move == PASS_MOVE) {
+
+            consecutive_passes++;
+
+
+            // 패스한 플레이어의 턴 기록 후
+            // 상대방에게 턴 전달
+            current_player =
+                get_opponent(current_player);
+
+
+            // ------------------------------------------------
+            // 두 번 연속 패스
+            // ------------------------------------------------
+
+            if (consecutive_passes >= 2) {
+
+                winner = calculate_winner();
+            }
+
+            return true;
+        }
+
+
+        // ====================================================
+        // 2. 일반 착수
+        // ====================================================
 
         if (!is_legal_move(move))
             return false;
@@ -429,12 +496,20 @@ public:
 
         int player = current_player;
 
+
         // 돌 배치
         board[move] = player;
 
 
         // ----------------------------------------------------
-        // 상대를 둘러쌌다면 즉시 승리
+        // 돌을 두었으므로 연속 패스 초기화
+        // ----------------------------------------------------
+
+        consecutive_passes = 0;
+
+
+        // ----------------------------------------------------
+        // 상대를 둘러쌌는지 확인
         // ----------------------------------------------------
 
         if (captures_enemy(move)) {
@@ -446,14 +521,16 @@ public:
 
 
         // 다음 플레이어
-        current_player = get_opponent(player);
+        current_player =
+            get_opponent(player);
+
 
         return true;
     }
 
 
     // --------------------------------------------------------
-    // 더 이상 둘 수 없으면 집 계산
+    // 게임 종료 확인
     // --------------------------------------------------------
 
     void check_game_end() {
@@ -461,9 +538,9 @@ public:
         if (winner != EMPTY)
             return;
 
-        auto legal_moves = get_legal_moves();
 
-        if (legal_moves.empty()) {
+        // 두 번 연속 패스했으면 종료
+        if (consecutive_passes >= 2) {
 
             winner = calculate_winner();
         }
@@ -509,7 +586,8 @@ public:
         }
 
 
-        // 안전장치
+        // max_turns 때문에 아직 종료되지 않았다면
+        // 현재 상태를 최종 점수로 평가
         if (temp.winner == EMPTY) {
 
             temp.winner =
@@ -559,7 +637,7 @@ public:
                     symbol = 'O';
                 }
                 else if (house_map[cell] == BLACK ||
-                         house_map[cell] == WHITE) {
+                        house_map[cell] == WHITE) {
                     symbol = 'H';
                 }
 
@@ -574,20 +652,48 @@ public:
 
         if (current_player == BLACK)
             cout << "BLACK";
-
         else
             cout << "WHITE";
 
 
         cout << '\n';
 
+
         cout << "BLACK 집 : "
-             << count_house(BLACK)
-             << '\n';
+            << count_house(BLACK)
+            << '\n';
 
         cout << "WHITE 집 : "
-             << count_house(WHITE)
-             << '\n';
+            << count_house(WHITE)
+            << '\n';
+
+
+        cout << "BLACK 점수 : "
+            << get_black_score()
+            << '\n';
+
+        cout << "WHITE 점수 : "
+            << get_white_score()
+            << '\n';
+
+
+        cout << "연속 패스 : "
+            << consecutive_passes
+            << '\n';
+
+
+        if (winner == BLACK) {
+            cout << "승자 : BLACK\n";
+        }
+        else if (winner == WHITE) {
+            cout << "승자 : WHITE\n";
+        }
+        else if (winner == DRAW) {
+            cout << "승자 : DRAW\n";
+        }
+        else {
+            cout << "게임 상태 : 진행 중\n";
+        }
     }
 };
 
