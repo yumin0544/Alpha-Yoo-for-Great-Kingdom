@@ -1,5 +1,8 @@
 # Build
 build/
+build-*/
+cmake-build-*/
+dist/
 
 # CLion
 .idea/
@@ -19,6 +22,10 @@ cmake_install.cmake
 # Python
 __pycache__/
 *.pyc
+.venv/
+*.pyd
+*.so
+*.egg-info/
 
 # Models
 *.pt

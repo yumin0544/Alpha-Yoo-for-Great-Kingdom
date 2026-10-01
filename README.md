@@ -25,8 +25,10 @@ neutral stone at its center.
   demo, and standalone tests without external dependencies.
 - Pure C++ MCTS with UCT selection, uniform random complete playouts,
   configurable simulation/time budgets, and an AI-versus-AI demo.
+- Python access to the same C++ engine and MCTS through `my_board_engine`,
+  built with pybind11 and installable with `pip`.
 
-Bitboard optimization, Python bindings, and neural network training are
+Bitboard optimization and neural network training are
 the next development stages.
 
 ## Build and run
@@ -140,13 +142,47 @@ if (recommendation.best_move) {
 }
 ```
 
+### Python에서 엔진과 MCTS 사용하기
+
+저장소 루트에서 현재 Python에 맞는 확장 모듈을 설치한다. Python과 C++20
+컴파일러가 필요하며, Windows에서는 Visual Studio Build Tools의 C++ 도구를
+사용할 수 있다.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe examples\python_demo.py --simulations 1000
+.\.venv\Scripts\python.exe examples\python_demo.py --self-play --simulations 64
+```
+
+이미 `.venv`가 있으면 첫 줄은 생략한다. Python API의 좌표는 **0부터 시작**하며
+예제의 화면 출력은 1부터 시작한다.
+
+```python
+import my_board_engine as engine
+
+game = engine.State()
+assert game.place(0, 0).accepted()
+searcher = engine.MCTS(engine.MCTSOptions(simulations=1000, seed=42))
+recommendation = searcher.search(game)
+if recommendation.best_move is not None:
+    assert game.play(recommendation.best_move).accepted()
+print(game.board.to_string())
+```
+
+바인딩은 `engine/`의 기존 규칙 판정을 호출한다. `game.board` 등 상태 조회값은
+사본이며, 대국은 `place`, `play`, `pass_turn`으로 진행한다. 종료 여부는
+`game.result.finished()`로 확인한다. 설치, 전체 API와 별도 CMake 빌드 방법은
+[Python 바인딩 안내](docs/python_bindings.md)에 있다. 기본 C++ 빌드는 Python
+패키지 설치 없이 계속 사용할 수 있다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan
 - [x] Basic Engine
 - [ ] Bitboard
 - [x] Pure MCTS
-- [ ] pybind11
+- [x] pybind11
 - [ ] PyTorch Neural Network and Self Play
 - [ ] C++ / LibTorch Self Play
 
@@ -155,4 +191,5 @@ if (recommendation.best_move) {
 - [Game rules and original examples (한국어)](docs/game_rules.md)
 - [Development plan and implementation choices (한국어)](docs/engine_design.md)
 - [Pure MCTS API and implementation (한국어)](docs/mcts_design.md)
+- [Python bindings and examples (한국어)](docs/python_bindings.md)
 - [Online game](https://worldsstone.com)

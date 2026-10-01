@@ -17,6 +17,17 @@
 - 플랫폼에 맞게 `.pyd` 또는 `.so`를 빌드한다.
 - Python에서도 C++과 동일한 상태, 착수, 합법 수, 종료 및 승패 판정을 사용한다.
 
+2026-10-02에 Windows CPython 3.14.8용 모듈 빌드·설치, CTest 6개 묶음,
+Python 15개 사례와 C++ 결과 비교를 검증했다. 사용 예제와 검증 환경은
+[Python 바인딩 안내](python_bindings.md)에 기록한다.
+- `bindings/module.cpp`는 코어와 순수 MCTS의 공개 API를 감싸며 `engine/`를 변경하지 않는다.
+- `pyproject.toml`의 scikit-build-core 구성으로 `python -m pip install .`을 지원한다.
+  CMake의 `BUILD_PYTHON_BINDINGS` 기본값은 꺼져 있어 기존 C++ 빌드에는 Python이 필요 없다.
+- 상태 조회는 사본을 반환하고, MCTS는 호출 시 상태를 복사한 뒤 C++ 탐색 동안
+  Python GIL을 해제한다. 진행 중인 대국의 완전한 복사는 `State.copy()`로 수행한다.
+- Python 사용 예제는 `examples/python_demo.py`, API와 설치 안내는
+  [python_bindings.md](python_bindings.md)에 기록한다.
+
 ## 3단계: Python + PyTorch 신경망과 강화학습
 
 - PyTorch 신경망을 구성한다.

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["scikit-build-core>=0.11,<2", "pybind11>=3.0,<4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "my-board-engine"
+version = "0.1.0"
+description = "Great Kingdom 9x9 C++ rules engine and pure MCTS"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+minimum-version = "0.11"
+cmake.build-type = "Release"
+build.targets = ["my_board_engine"]
+wheel.packages = []
+sdist.include = ["bindings/**", "engine/**", "mcts/**", "examples/**", "tests/**", "docs/**", "CMakeLists.txt"]
+sdist.exclude = [".venv/**", "build*/**", "cmake-build-*/**", "dist/**"]
+
+[tool.scikit-build.cmake.define]
+BUILD_PYTHON_BINDINGS = "ON"
+BUILD_TESTING = "OFF"

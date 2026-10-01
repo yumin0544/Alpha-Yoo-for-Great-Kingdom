@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(BoardGameEngine VERSION 0.1.0 LANGUAGES CXX)
 
+option(BUILD_PYTHON_BINDINGS "Build the my_board_engine Python extension" OFF)
+
 add_library(engine
     engine/src/Board.cpp
     engine/src/Move.cpp
@@ -35,6 +37,20 @@ target_include_directories(mcts PUBLIC
 )
 set_target_properties(mcts PROPERTIES CXX_EXTENSIONS OFF)
 enable_project_warnings(mcts)
+
+if(BUILD_PYTHON_BINDINGS)
+    # These targets are linked into a shared Python module on Unix as well.
+    set_target_properties(engine mcts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module)
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(pybind11 3.0 CONFIG REQUIRED)
+    pybind11_add_module(my_board_engine bindings/module.cpp)
+    target_link_libraries(my_board_engine PRIVATE mcts)
+    set_target_properties(my_board_engine PROPERTIES CXX_EXTENSIONS OFF)
+    enable_project_warnings(my_board_engine)
+    # pip installs this extension at the top level: import my_board_engine.
+    install(TARGETS my_board_engine LIBRARY DESTINATION . RUNTIME DESTINATION .)
+endif()
 
 add_executable(mcts_demo examples/mcts_demo.cpp)
 set_target_properties(mcts_demo PROPERTIES OUTPUT_NAME MCTSDemo)
@@ -74,4 +90,15 @@ if(BUILD_TESTING)
         "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/console_test.cmake"
     )
+    if(BUILD_PYTHON_BINDINGS)
+        add_executable(binding_reference tests/binding_reference.cpp)
+        target_link_libraries(binding_reference PRIVATE mcts)
+        enable_project_warnings(binding_reference)
+        add_test(NAME python_binding_test COMMAND "${CMAKE_COMMAND}" -E env
+            "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>"
+            "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/python_binding_test.py"
+            --reference "$<TARGET_FILE:binding_reference>"
+        )
+        set_tests_properties(python_binding_test PROPERTIES TIMEOUT 60)
+    endif()
 endif()
