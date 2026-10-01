@@ -8,15 +8,18 @@ neutral stone at its center.
 ## Current features
 
 - Fixed 9x9 array board, orthogonal neighbors, and stone groups.
-- Validated placement, alternating turns, passes, and stone inventory.
+- Validated placement, alternating turns, passes, and 41 stones per player.
 - Instant victory when an opposing group has no remaining liberties, with
   opponent capture taking priority over simultaneous self-capture.
+- Suicide moves are accepted and immediately lose to the opponent when no
+  opposing group is captured.
 - Territory detection using player stones, board edges, and the neutral stone;
-  completed ownership is retained and opponents cannot enter it.
+  completed ownership is retained and neither player can enter a completed house.
+- Territory using one, two, or three board edges is accepted; four edges are excluded.
 - End after two consecutive passes. Black wins only when its territory exceeds
   White's territory by at least 3 empty points.
 - Optional neutral position, including a game without a neutral stone.
-- Configurable handling of unresolved rule details, documented in
+- Configurable analysis variants, including a suicide prohibition, documented in
   [the engine design](docs/engine_design.md).
 - A command-line demo and standalone tests without external dependencies.
 

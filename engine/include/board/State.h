@@ -12,12 +12,12 @@ namespace kingdom {
 
 enum class SuicideRule { Forbidden, Loses };
 
-// Provisional choices for the unresolved items in docs/game_rules.md.
+// Confirmed game defaults; overrides are explicit analysis variants.
 struct GameRules {
-    SuicideRule suicide_rule = SuicideRule::Forbidden;
-    bool allow_own_territory_moves = true;
+    SuicideRule suicide_rule = SuicideRule::Loses;
+    bool allow_own_territory_moves = false;
     bool allow_single_edge_territory = true;
-    int stones_per_player = 40;
+    int stones_per_player = 41;
 };
 
 enum class MoveError {

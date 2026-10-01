@@ -62,7 +62,7 @@ public:
     std::vector<Position> liberties(Position pos) const;
 
     // Counts empty cells only. Own stones and neutral stones act as walls.
-    // Single-edge territory remains configurable until the rule is confirmed.
+    // Single-edge territory is allowed by default; false is an analysis variant.
     Territory territory(bool allow_single_edge = true) const;
     std::string to_string() const;
 

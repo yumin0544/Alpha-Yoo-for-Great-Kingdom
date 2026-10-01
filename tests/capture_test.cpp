@@ -1,6 +1,8 @@
 #include "board/State.h"
 #include "test_support.h"
 
+#include <algorithm>
+
 using namespace kingdom;
 using namespace kingdom::test;
 
@@ -67,7 +69,18 @@ void neutral_wall_and_white_capture() {
 void configurable_suicide() {
     // Connecting to an existing black stone avoids a pre-existing white territory cell.
     const Board board = make_board({{0, 1}}, {{0, 0}, {0, 2}, {1, 0}, {1, 2}, {2, 1}});
-    State forbidden(board, Cell::Black);
+    CHECK(board.liberties({0, 1}).size() == 1);
+    CHECK(board.liberties({0, 1}).front() == Position{1, 1});
+    Board illustrated_move = board;
+    CHECK(illustrated_move.place({1, 1}, Cell::Black));
+    CHECK(illustrated_move.group_at({0, 1}).size() == 2);
+    CHECK(illustrated_move.liberties({0, 1}).empty());
+    CHECK(!illustrated_move.liberties({0, 0}).empty());
+    CHECK(!illustrated_move.liberties({0, 2}).empty());
+    CHECK(!illustrated_move.liberties({2, 1}).empty());
+    GameRules variant;
+    variant.suicide_rule = SuicideRule::Forbidden;
+    State forbidden(board, Cell::Black, variant);
     CHECK(forbidden.territory_owner({1, 1}) == Cell::Empty);
     const auto before = forbidden.board().cells();
     CHECK(!forbidden.is_legal(Move::place(1, 1)));
@@ -76,14 +89,35 @@ void configurable_suicide() {
     CHECK(forbidden.to_play() == Cell::Black);
     CHECK(!forbidden.result().finished());
 
-    GameRules rules;
-    rules.suicide_rule = SuicideRule::Loses;
-    State loses(board, Cell::Black, rules);
+    State loses(board, Cell::Black);
     CHECK(loses.is_legal(Move::place(1, 1)));
-    CHECK(loses.play(Move::place(1, 1)).accepted());
+    const auto legal = loses.legal_moves();
+    CHECK(std::find(legal.begin(), legal.end(), Move::place(1, 1)) != legal.end());
+    const int remaining = loses.remaining_stones(Cell::Black);
+    const auto outcome = loses.play(Move::place(1, 1));
+    CHECK(outcome.accepted());
+    CHECK(outcome.result.finished());
+    CHECK(outcome.result.winner == Cell::White);
+    CHECK(loses.board().at({1, 1}) == Cell::Black);
+    CHECK(loses.remaining_stones(Cell::Black) == remaining - 1);
     CHECK(loses.result().finished());
     CHECK(loses.result().reason == EndReason::Suicide);
     CHECK(loses.result().winner == Cell::White);
+    CHECK(loses.legal_moves().empty());
+    CHECK(loses.play(Move::pass()).error == MoveError::GameOver);
+
+    // The second player must lose as well when making the same self-surround.
+    auto reversed_cells = board.cells();
+    for (auto& cell : reversed_cells) {
+        if (is_player(cell)) {
+            cell = opponent(cell);
+        }
+    }
+    State white_loses(Board(reversed_cells), Cell::White);
+    CHECK(white_loses.is_legal(Move::place(1, 1)));
+    CHECK(white_loses.play(Move::place(1, 1)).accepted());
+    CHECK(white_loses.result().reason == EndReason::Suicide);
+    CHECK(white_loses.result().winner == Cell::Black);
 }
 
 } // namespace

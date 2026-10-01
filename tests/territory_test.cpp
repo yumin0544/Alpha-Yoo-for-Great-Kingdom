@@ -43,6 +43,10 @@ void edges_and_four_edge_exclusion() {
     Board single_edge = make_board({{0, 2}, {0, 5}, {1, 3}, {1, 4}});
     CHECK(single_edge.territory().black == 2);
     CHECK(single_edge.territory(false).black == 0);
+    State edge_house(single_edge, Cell::Black);
+    CHECK(edge_house.score().black == 2);
+    CHECK(edge_house.play(Move::place(0, 3)).error == MoveError::OwnTerritory);
+    CHECK(edge_house.score().black == 2);
 
     Board corner = make_board({{0, 2}, {1, 1}, {2, 0}});
     CHECK(corner.territory().black == 3);
@@ -90,12 +94,27 @@ void completed_houses_and_permanent_ownership() {
 
     State owner_turn(board, Cell::Black);
     CHECK(owner_turn.score().black == 1);
-    CHECK(owner_turn.play(Move::place(2, 2)).accepted());
-    CHECK(owner_turn.board().at({2, 2}) == Cell::Black);
-    CHECK(owner_turn.territory_owner({2, 2}) == Cell::Black);
-    CHECK(owner_turn.score().black == 0);
+    const auto before = owner_turn.board().cells();
+    const auto claims = owner_turn.ownership();
+    CHECK(!owner_turn.is_legal(Move::place(2, 2)));
+    CHECK(owner_turn.play(Move::place(2, 2)).error == MoveError::OwnTerritory);
+    CHECK(owner_turn.board().cells() == before);
+    CHECK(owner_turn.ownership() == claims);
+    CHECK(owner_turn.remaining_stones(Cell::Black) == 37);
+    CHECK(owner_turn.to_play() == Cell::Black);
+    CHECK(owner_turn.score().black == 1);
     CHECK(owner_turn.play(Move::place(0, 0)).accepted());
     CHECK(owner_turn.territory_owner({2, 2}) == Cell::Black);
+    CHECK(owner_turn.score().black == 1);
+
+    // Explicit non-standard analysis variant, not the confirmed game defaults.
+    GameRules variant;
+    variant.allow_own_territory_moves = true;
+    State allowed(board, Cell::Black, variant);
+    CHECK(allowed.play(Move::place(2, 2)).accepted());
+    CHECK(allowed.board().at({2, 2}) == Cell::Black);
+    CHECK(allowed.territory_owner({2, 2}) == Cell::Black);
+    CHECK(allowed.score().black == 0);
 
     GameRules rules;
     rules.allow_own_territory_moves = false;

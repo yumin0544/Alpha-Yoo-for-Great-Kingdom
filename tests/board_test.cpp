@@ -62,19 +62,19 @@ void turns_passes_and_game_over() {
     State state;
     CHECK(state.to_play() == Cell::Black);
     CHECK(!state.result().finished());
-    CHECK(state.remaining_stones(Cell::Black) == 40);
-    CHECK(state.remaining_stones(Cell::White) == 40);
+    CHECK(state.remaining_stones(Cell::Black) == 41);
+    CHECK(state.remaining_stones(Cell::White) == 41);
     CHECK(state.play(Move::place(4, 4)).error == MoveError::Occupied);
     CHECK(state.play(Move::place(-1, 0)).error == MoveError::OutOfBounds);
     CHECK(state.to_play() == Cell::Black);
-    CHECK(state.remaining_stones(Cell::Black) == 40);
+    CHECK(state.remaining_stones(Cell::Black) == 41);
 
     CHECK(state.play(Move::place(0, 0)).accepted());
     CHECK(state.to_play() == Cell::White);
-    CHECK(state.remaining_stones(Cell::Black) == 39);
+    CHECK(state.remaining_stones(Cell::Black) == 40);
     CHECK(state.play(Move::pass()).accepted());
     CHECK(state.consecutive_passes() == 1);
-    CHECK(state.remaining_stones(Cell::White) == 40);
+    CHECK(state.remaining_stones(Cell::White) == 41);
     CHECK(state.play(Move::place(0, 0)).error == MoveError::Occupied);
     CHECK(state.consecutive_passes() == 1);
     CHECK(state.to_play() == Cell::Black);
@@ -96,6 +96,11 @@ void turns_passes_and_game_over() {
 }
 
 void exhausted_stocks_and_score_threshold() {
+    State no_neutral(GameRules{}, std::nullopt);
+    CHECK(no_neutral.board().count(Cell::Empty) == 81);
+    CHECK(no_neutral.remaining_stones(Cell::Black) == 41);
+    CHECK(no_neutral.remaining_stones(Cell::White) == 41);
+
     GameRules rules;
     rules.stones_per_player = 1;
     State state(rules);
