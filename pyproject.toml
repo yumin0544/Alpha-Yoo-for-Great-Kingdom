@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "my-board-engine"
 version = "0.1.0"
-description = "Great Kingdom 9x9 C++ rules engine and pure MCTS"
+description = "Great Kingdom 9x9 C++ rules, MCTS/PUCT and PyTorch reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.10"
 

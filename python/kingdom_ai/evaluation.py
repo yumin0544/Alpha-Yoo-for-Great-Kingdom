@@ -1,0 +1,152 @@
+"""Compare two models with paired colors and equal deterministic search budgets."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+
+import my_board_engine as engine
+import torch
+
+from .model import PolicyValueNet
+from .puct import PUCT, PUCTOptions, sample_visits
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    """Results from the candidate's perspective; ``endings`` uses enum names."""
+
+    games: int
+    wins: int
+    losses: int
+    wins_as_black: int
+    wins_as_white: int
+    total_plies: int
+    endings: dict[str, int]
+
+    @property
+    def win_rate(self) -> float:
+        return self.wins / self.games
+
+
+def _integer(name: str, value: int, minimum: int) -> None:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+
+
+def _real(name: str, value: float, *, positive: bool) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a real number")
+    if not math.isfinite(value) or (value <= 0 if positive else value < 0):
+        qualifier = "positive" if positive else "non-negative"
+        raise ValueError(f"{name} must be finite and {qualifier}")
+
+
+def _play_game(
+    candidate: PolicyValueNet,
+    reference: PolicyValueNet,
+    candidate_color: engine.Cell,
+    *,
+    simulations: int,
+    c_puct: float,
+    seed: int,
+    opening_moves: int,
+    opening_temperature: float,
+) -> tuple[engine.Cell, engine.EndReason, int]:
+    # New searchers and a reset generator make each swapped-color pair use
+    # the same randomness. Search itself has no noise or wall-clock budget.
+    searchers = {
+        candidate_color: PUCT(candidate, PUCTOptions(
+            simulations=simulations, c_puct=c_puct, seed=seed,
+            time_limit_ms=0, dirichlet_epsilon=0,
+        )),
+        engine.Cell.White if candidate_color == engine.Cell.Black else engine.Cell.Black:
+            PUCT(reference, PUCTOptions(
+                simulations=simulations, c_puct=c_puct, seed=seed,
+                time_limit_ms=0, dirichlet_epsilon=0,
+            )),
+    }
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    game = engine.State()
+    plies = 0
+    while not game.result.finished():
+        result = searchers[game.to_play].search(game)
+        temperature = opening_temperature if plies < opening_moves else 0.0
+        move = sample_visits(result, temperature=temperature, generator=generator)
+        if not game.play(move).accepted():
+            raise RuntimeError("Evaluation PUCT produced a rejected move")
+        plies += 1
+        if plies > 2 * engine.CELL_COUNT + 2:
+            raise RuntimeError("Evaluation game exceeded its finite move bound")
+    if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
+        raise RuntimeError("A completed evaluation game must have a winner")
+    return game.result.winner, game.result.reason, plies
+
+
+def evaluate_models(
+    candidate: PolicyValueNet,
+    reference: PolicyValueNet,
+    *,
+    games: int = 20,
+    simulations: int = 128,
+    c_puct: float = 1.5,
+    seed: int = 42,
+    opening_moves: int = 6,
+    opening_temperature: float = 1.0,
+) -> EvaluationResult:
+    """Play equal-budget pairs, with the candidate first black then white.
+
+    Pair ``i`` uses ``(seed + i) % 2**64`` for both games. During the first
+    ``opening_moves`` plies, moves are sampled from root visits; subsequent
+    moves use the most visited root action. Root Dirichlet noise is disabled.
+    Identical deterministic models therefore score exactly 50% in each pair,
+    even when the rules or their preferred opening favor one color.
+
+    Parameters, gradients, model devices, global RNG and thread settings are
+    preserved. Every module's train/eval flag is restored, including on error.
+    The function runs games sequentially using the default engine rules.
+    """
+    if not isinstance(candidate, PolicyValueNet) or not isinstance(reference, PolicyValueNet):
+        raise TypeError("candidate and reference must be PolicyValueNet models")
+    _integer("games", games, 2)
+    if games % 2:
+        raise ValueError("games must be even so colors can be paired")
+    _integer("simulations", simulations, 1)
+    _real("c_puct", c_puct, positive=True)
+    _integer("seed", seed, 0)
+    if seed >= 2 ** 64:
+        raise ValueError("seed must be an unsigned 64-bit integer")
+    _integer("opening_moves", opening_moves, 0)
+    _real("opening_temperature", opening_temperature, positive=False)
+
+    # NeuralAgent restores the top-level flag after each inference. Preserve
+    # all flags here as well, because a caller may use mixed module modes.
+    modes = {module: module.training for model in (candidate, reference)
+             for module in model.modules()}
+    wins = wins_as_black = wins_as_white = total_plies = 0
+    endings: dict[str, int] = {}
+    try:
+        for pair in range(games // 2):
+            pair_seed = (seed + pair) % (2 ** 64)
+            for color in (engine.Cell.Black, engine.Cell.White):
+                winner, reason, plies = _play_game(
+                    candidate, reference, color, simulations=simulations,
+                    c_puct=c_puct, seed=pair_seed, opening_moves=opening_moves,
+                    opening_temperature=opening_temperature,
+                )
+                total_plies += plies
+                endings[reason.name] = endings.get(reason.name, 0) + 1
+                if winner == color:
+                    wins += 1
+                    wins_as_black += color == engine.Cell.Black
+                    wins_as_white += color == engine.Cell.White
+    finally:
+        for module, training in modes.items():
+            module.training = training
+    return EvaluationResult(
+        games=games, wins=wins, losses=games - wins,
+        wins_as_black=wins_as_black, wins_as_white=wins_as_white,
+        total_plies=total_plies, endings=endings,
+    )

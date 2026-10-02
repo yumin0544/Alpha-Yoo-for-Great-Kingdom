@@ -31,9 +31,12 @@ neutral stone at its center.
   output, legal-move masking, MCTS teacher data, one-step training, and checkpoints.
 - Neural PUCT with C++ tree search, PyTorch leaf evaluation, optional root noise,
   and visit-based self-play data compatible with the existing training API.
+- Repeated self-play learning with bounded FIFO replay, paired-color strength
+  evaluation, champion promotion, metrics, and complete training resume.
 
-Bitboard optimization, large-scale reinforcement learning, and C++/LibTorch
-inference remain the next development stages.
+Bitboard optimization, large-scale learning experiments, and C++/LibTorch
+inference remain the next development stages. Training speed and model strength
+must be measured with the chosen settings.
 
 ## Build and run
 
@@ -228,6 +231,24 @@ if recommendation.best_move is not None:
 잡음과 방문 수에 따른 행동 샘플링을 제공한다. 탐색은 입력 대국을 바꾸지
 않는다. API, 값의 관점과 학습 자료 계약은 [PUCT 설계](docs/puct_design.md)에 있다.
 
+### 반복 학습과 중단 후 재개하기
+
+현재 기준 모델의 자가 대국을 FIFO 버퍼에 축적하고, 후보를 미니배치로 학습한
+뒤 흑백 교대 대국으로 평가한다. 후보 승률이 기준 이상이면 기준 모델을
+교체한다. 아래는 작은 탐색 예산으로 실행 연결을 확인하는 예시다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --iterations 1 --games-per-iteration 2 --simulations 4 --eval-games 2 --eval-simulations 4 --train-steps 2 --batch-size 16 --channels 8 --residual-blocks 1 --output runs\smoke
+.\.venv\Scripts\python.exe examples\train.py --resume runs\smoke\latest.pt --iterations 1 --output runs\smoke
+```
+
+`latest.pt`에는 모델·optimizer·버퍼·설정·진행 횟수·난수 상태를 저장한다.
+`best.pt`는 기존 `load_model`로 읽을 수 있는 기준 모델이고, `metrics.jsonl`은
+완료 반복별 손실·평가·시간 기록이다. `--iterations`는 이번 실행의 추가 반복
+수이며, 재개할 때 학습 설정은 체크포인트에서 복원한다. 실행 중인 반복은
+중단 후 처음부터 다시 수행한다. 설정과 API는
+[강화학습 루프 안내](docs/training_loop.md)에 있다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan
@@ -237,7 +258,8 @@ if recommendation.best_move is not None:
 - [x] pybind11
 - [x] PyTorch input/output contract and model connection
 - [x] Neural PUCT and self-play data generation
-- [ ] Large-scale reinforcement learning and strength evaluation
+- [x] Repeated learning, replay buffer, strength evaluation, and full resume
+- [ ] Large-scale learning experiments and validated playing strength
 - [ ] C++ / LibTorch Self Play
 
 ## Project references
@@ -248,4 +270,5 @@ if recommendation.best_move is not None:
 - [Python bindings and examples (한국어)](docs/python_bindings.md)
 - [PyTorch input/output and model connection (한국어)](docs/neural_network.md)
 - [Neural PUCT search and self-play data (한국어)](docs/puct_design.md)
+- [Repeated learning, evaluation, and resume (한국어)](docs/training_loop.md)
 - [Online game](https://worldsstone.com)

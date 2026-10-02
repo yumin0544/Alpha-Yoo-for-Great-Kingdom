@@ -31,5 +31,8 @@ __pycache__/
 *.pt
 *.pth
 
+# Local reinforcement-learning runs
+runs/
+
 # OS
 .DS_Store

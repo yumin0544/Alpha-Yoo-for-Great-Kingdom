@@ -128,6 +128,13 @@ if(BUILD_TESTING)
                 "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/puct_test.py"
             )
             set_tests_properties(puct_test PROPERTIES TIMEOUT 120)
+            foreach(learning_test IN ITEMS replay_test evaluation_test reinforcement_test)
+                add_test(NAME ${learning_test} COMMAND "${CMAKE_COMMAND}" -E env
+                    "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>${neural_path_separator}${CMAKE_CURRENT_SOURCE_DIR}/python"
+                    "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/${learning_test}.py"
+                )
+                set_tests_properties(${learning_test} PROPERTIES TIMEOUT 180)
+            endforeach()
         endif()
     endif()
 endif()

@@ -13,6 +13,9 @@ from .training import (
     GameData, Losses, TrainingBatch, TrainingSample, collect_mcts_game, collect_puct_game,
     make_batch, policy_value_loss, train_step,
 )
+from .replay import ReplayBuffer
+from .evaluation import EvaluationResult, evaluate_models
+from .loop import Trainer, TrainingConfig
 
 __all__ = [
     "ACTION_SIZE", "BOARD_SIZE", "FEATURE_NAMES", "FORMAT_VERSION", "INPUT_CHANNELS",
@@ -21,4 +24,5 @@ __all__ = [
     "Prediction", "load_model", "save_model", "GameData", "Losses", "TrainingBatch",
     "TrainingSample", "collect_mcts_game", "collect_puct_game", "make_batch", "policy_value_loss", "train_step",
     "PUCT", "PUCTOptions", "PUCTSearchResult", "sample_visits",
+    "ReplayBuffer", "EvaluationResult", "evaluate_models", "Trainer", "TrainingConfig",
 ]
