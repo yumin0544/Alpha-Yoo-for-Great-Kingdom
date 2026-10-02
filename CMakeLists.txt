@@ -34,6 +34,7 @@ enable_project_warnings(engine)
 add_library(mcts
     mcts/src/Node.cpp
     mcts/src/MCTS.cpp
+    mcts/src/PUCT.cpp
 )
 target_link_libraries(mcts PUBLIC engine)
 target_include_directories(mcts PUBLIC
@@ -122,6 +123,11 @@ if(BUILD_TESTING)
                 "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/neural_test.py"
             )
             set_tests_properties(neural_test PROPERTIES TIMEOUT 60)
+            add_test(NAME puct_test COMMAND "${CMAKE_COMMAND}" -E env
+                "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>${neural_path_separator}${CMAKE_CURRENT_SOURCE_DIR}/python"
+                "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/puct_test.py"
+            )
+            set_tests_properties(puct_test PROPERTIES TIMEOUT 120)
         endif()
     endif()
 endif()

@@ -1,4 +1,5 @@
 #include "MCTS.h"
+#include "PUCT.h"
 #include "board/State.h"
 
 #include <pybind11/operators.h>
@@ -8,6 +9,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
+#include <utility>
 
 namespace py = pybind11;
 using namespace kingdom;
@@ -34,10 +37,46 @@ private:
     std::mutex mutex_;
 };
 
+class PythonPUCT {
+public:
+    explicit PythonPUCT(PUCTOptions options) : searcher_(options) {}
+
+    PUCTSearchResult search(const State& state, const py::function& evaluator) {
+        const State snapshot = state;
+        // Capture by reference: the Python call frame owns the callable until
+        // search returns. Python objects are created/destroyed only with the GIL.
+        const auto evaluate = [&evaluator](const State& position) {
+            py::gil_scoped_acquire acquire;
+            const auto evaluated = evaluator(py::cast(State(position)));
+            const auto output = evaluated.cast<
+                std::pair<std::array<double, PUCT::kActionCount>, double>>();
+            return PUCTEvaluation{output.first, output.second};
+        };
+        py::gil_scoped_release release;
+        const std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (searching_) {
+            throw std::runtime_error("Recursive search on the same PUCT object is not supported");
+        }
+        searching_ = true;
+        struct ResetFlag {
+            bool& flag;
+            ~ResetFlag() { flag = false; }
+        } reset{searching_};
+        return searcher_.search(snapshot, evaluate);
+    }
+
+    PUCTOptions options() const { return searcher_.options(); }
+
+private:
+    PUCT searcher_;
+    std::recursive_mutex mutex_;
+    bool searching_ = false;
+};
+
 } // namespace
 
 PYBIND11_MODULE(my_board_engine, module) {
-    module.doc() = "Great Kingdom C++ rules engine and pure MCTS. Coordinates are zero-based.";
+    module.doc() = "Great Kingdom C++ rules, pure MCTS and policy/value PUCT. Coordinates are zero-based.";
     module.attr("__version__") = "0.1.0";
     module.attr("BOARD_SIZE") = Board::kSize;
     module.attr("CELL_COUNT") = Board::kCellCount;
@@ -212,4 +251,45 @@ PYBIND11_MODULE(my_board_engine, module) {
         .def_property_readonly("options", &PythonMCTS::options)
         .def("search", &PythonMCTS::search, py::arg("state"),
              "Search a snapshot of state. Releases the GIL; shared searchers serialize calls.");
+
+    py::class_<PUCTOptions>(module, "PUCTOptions")
+        .def(py::init([](std::size_t simulations, double c_puct, std::uint64_t seed,
+                         std::uint64_t time_limit_ms, double dirichlet_alpha,
+                         double dirichlet_epsilon) {
+            PUCTOptions options;
+            options.simulations = simulations;
+            options.c_puct = c_puct;
+            options.seed = seed;
+            options.time_limit_ms = time_limit_ms;
+            options.dirichlet_alpha = dirichlet_alpha;
+            options.dirichlet_epsilon = dirichlet_epsilon;
+            return options;
+        }), py::arg("simulations") = 128, py::arg("c_puct") = 1.5,
+            py::arg("seed") = 42, py::arg("time_limit_ms") = 0,
+            py::arg("dirichlet_alpha") = 0.3, py::arg("dirichlet_epsilon") = 0.0)
+        .def_readwrite("simulations", &PUCTOptions::simulations)
+        .def_readwrite("c_puct", &PUCTOptions::c_puct)
+        .def_readwrite("seed", &PUCTOptions::seed)
+        .def_readwrite("time_limit_ms", &PUCTOptions::time_limit_ms)
+        .def_readwrite("dirichlet_alpha", &PUCTOptions::dirichlet_alpha)
+        .def_readwrite("dirichlet_epsilon", &PUCTOptions::dirichlet_epsilon);
+    py::class_<PUCTMoveStatistics>(module, "PUCTMoveStatistics")
+        .def_property_readonly("move", [](const PUCTMoveStatistics& stats) { return stats.move; })
+        .def_readonly("prior", &PUCTMoveStatistics::prior)
+        .def_readonly("visits", &PUCTMoveStatistics::visits)
+        .def_readonly("value", &PUCTMoveStatistics::value);
+    py::class_<PUCTSearchResult>(module, "PUCTSearchResult")
+        .def_property_readonly("best_move", [](const PUCTSearchResult& result) { return result.best_move; })
+        .def_readonly("simulations", &PUCTSearchResult::simulations)
+        .def_readonly("nodes", &PUCTSearchResult::nodes)
+        .def_readonly("network_evaluations", &PUCTSearchResult::network_evaluations)
+        .def_readonly("root_value", &PUCTSearchResult::root_value)
+        .def_readonly("best_value", &PUCTSearchResult::best_value)
+        .def_readonly("elapsed_seconds", &PUCTSearchResult::elapsed_seconds)
+        .def_property_readonly("moves", [](const PUCTSearchResult& result) { return result.moves; });
+    py::class_<PythonPUCT>(module, "PUCT")
+        .def(py::init<PUCTOptions>(), py::arg("options") = PUCTOptions{})
+        .def_property_readonly("options", &PythonPUCT::options)
+        .def("search", &PythonPUCT::search, py::arg("state"), py::arg("evaluator"),
+             "C++ PUCT using evaluator(state) -> (82 policy weights, current-player value).");
 }

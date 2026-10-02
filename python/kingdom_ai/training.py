@@ -1,6 +1,7 @@
-"""Small MCTS-teacher bootstrap; neural PUCT/self-play training comes later."""
+"""Completed MCTS/PUCT games and policy/value training batches."""
 
 from dataclasses import dataclass
+import math
 from typing import Sequence
 
 import torch
@@ -53,6 +54,39 @@ def collect_mcts_game(simulations=64, seed=42) -> GameData:
         positions.append((encoded, policy))
         if search.best_move is None or not game.play(search.best_move).accepted():
             raise RuntimeError("MCTS failed to produce an accepted game move")
+        if len(positions) > 2 * engine.CELL_COUNT + 2:
+            raise RuntimeError("Game exceeded its finite move bound")
+    winner = game.result.winner
+    samples = [TrainingSample(
+        encoded.features, encoded.legal_mask, policy,
+        1.0 if encoded.to_play == winner else -1.0, encoded.to_play,
+    ) for encoded, policy in positions]
+    return GameData(samples, winner, game.result.reason)
+
+
+def collect_puct_game(model, options=None, temperature=1.0, seed=42) -> GameData:
+    """Play both sides with neural PUCT and label PRE-MOVE player outcomes."""
+    from .puct import PUCT, PUCTOptions, sample_visits
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 64:
+        raise ValueError("Seed must be an unsigned 64-bit integer")
+    if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
+        raise TypeError("Temperature must be a real number")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("Temperature must be finite and non-negative")
+    if options is None:
+        options = PUCTOptions(seed=seed, dirichlet_epsilon=0.25)
+    searcher = PUCT(model, options)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    game = engine.State()
+    positions = []
+    while not game.result.finished():
+        encoded = encode_state(game)
+        search = searcher.search(game)
+        policy = visit_policy(search, game)
+        move = sample_visits(search, temperature=temperature, generator=generator)
+        positions.append((encoded, policy))
+        if not game.play(move).accepted():
+            raise RuntimeError("PUCT failed to produce an accepted game move")
         if len(positions) > 2 * engine.CELL_COUNT + 2:
             raise RuntimeError("Game exceeded its finite move bound")
     winner = game.result.winner

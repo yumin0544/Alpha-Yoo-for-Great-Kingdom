@@ -29,9 +29,11 @@ neutral stone at its center.
   built with pybind11 and installable with `pip`.
 - A PyTorch policy/value model with a documented 10-plane input and 82-action
   output, legal-move masking, MCTS teacher data, one-step training, and checkpoints.
+- Neural PUCT with C++ tree search, PyTorch leaf evaluation, optional root noise,
+  and visit-based self-play data compatible with the existing training API.
 
-Bitboard optimization, neural MCTS, and large-scale reinforcement learning remain
-the next development stages.
+Bitboard optimization, large-scale reinforcement learning, and C++/LibTorch
+inference remain the next development stages.
 
 ## Build and run
 
@@ -192,9 +194,39 @@ C++의 합법 수를 적용하여 모델의 추천 수를 실제 대국에 전�
 
 예제는 모델의 합법 수 추천, 순수 MCTS 대국 1판에서 만든 자료로 학습 1회,
 모델 저장·복원과 결과 일치를 확인한다. 초기 가중치는 무작위이며, 이 한 번의
-학습으로 기력이 검증된 것은 아니다. 기존 C++ MCTS에는 아직 신경망 추론을
-결합하지 않았다. 입력 평면, 행동 번호와 학습 목표는
+학습으로 기력이 검증된 것은 아니다. 기존 C++ MCTS는 순수 무작위 탐색을
+유지하며, 신경망 탐색은 별도 PUCT로 사용한다. 입력 평면, 행동 번호와 학습 목표는
 [신경망 연결 안내](docs/neural_network.md)에 있다.
+
+### 신경망 PUCT로 추천 수와 자가 대국 만들기
+
+C++ PUCT가 신경망 정책을 탐색의 사전 확률로 사용하고, 새로운 잎의 평가값은
+PyTorch 모델에서 받는다. 종료 상태는 모델 대신 C++ 엔진의 확정 승패를
+사용한다. 업데이트한 패키지를 설치한 뒤 다음 예제를 실행한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install . --no-deps --no-build-isolation
+.\.venv\Scripts\python.exe examples\puct_demo.py --simulations 128
+.\.venv\Scripts\python.exe examples\puct_demo.py --self-play --simulations 64
+```
+
+기본 실행은 추천 수와 후보별 방문 수·정책 사전 확률·평가값을 표시한다.
+`--self-play`는 종료까지 대국하고 학습 자료를 만든다. `--checkpoint`에 기존
+모델 파일을 주면 그 가중치를 사용하고, 생략하면 무작위 초기 모델로 연결을
+확인한다. 입력 형식은 기존 `10×9×9`, 정책 행동은 패스를 포함한 82개다.
+
+```python
+from kingdom_ai import PUCT, PUCTOptions, PolicyValueNet
+
+searcher = PUCT(PolicyValueNet(), PUCTOptions(simulations=128), device="cpu")
+recommendation = searcher.search(game)
+if recommendation.best_move is not None:
+    assert game.play(recommendation.best_move).accepted()
+```
+
+평가 검색은 루트 잡음을 기본적으로 끄며, 학습용 자료 생성은 선택적 루트
+잡음과 방문 수에 따른 행동 샘플링을 제공한다. 탐색은 입력 대국을 바꾸지
+않는다. API, 값의 관점과 학습 자료 계약은 [PUCT 설계](docs/puct_design.md)에 있다.
 
 ## Roadmap
 
@@ -204,7 +236,8 @@ C++의 합법 수를 적용하여 모델의 추천 수를 실제 대국에 전�
 - [x] Pure MCTS
 - [x] pybind11
 - [x] PyTorch input/output contract and model connection
-- [ ] Neural MCTS and reinforcement-learning self play
+- [x] Neural PUCT and self-play data generation
+- [ ] Large-scale reinforcement learning and strength evaluation
 - [ ] C++ / LibTorch Self Play
 
 ## Project references
@@ -214,4 +247,5 @@ C++의 합법 수를 적용하여 모델의 추천 수를 실제 대국에 전�
 - [Pure MCTS API and implementation (한국어)](docs/mcts_design.md)
 - [Python bindings and examples (한국어)](docs/python_bindings.md)
 - [PyTorch input/output and model connection (한국어)](docs/neural_network.md)
+- [Neural PUCT search and self-play data (한국어)](docs/puct_design.md)
 - [Online game](https://worldsstone.com)
