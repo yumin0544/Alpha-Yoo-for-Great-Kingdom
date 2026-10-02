@@ -27,8 +27,10 @@ neutral stone at its center.
   configurable simulation/time budgets, and an AI-versus-AI demo.
 - Python access to the same C++ engine and MCTS through `my_board_engine`,
   built with pybind11 and installable with `pip`.
+- A PyTorch policy/value model with a documented 10-plane input and 82-action
+  output, legal-move masking, MCTS teacher data, one-step training, and checkpoints.
 
-Bitboard optimization and neural network training are
+Bitboard optimization, neural MCTS, and large-scale reinforcement learning remain
 the next development stages.
 
 ## Build and run
@@ -176,6 +178,24 @@ print(game.board.to_string())
 [Python 바인딩 안내](docs/python_bindings.md)에 있다. 기본 C++ 빌드는 Python
 패키지 설치 없이 계속 사용할 수 있다.
 
+### PyTorch 모델 연결 확인하기
+
+입력은 현재 플레이어 관점의 `[N, 10, 9, 9]` 텐서다. 모델은 보드 81칸과
+패스의 정책 점수 `[N, 82]`, 현재 플레이어의 평가값 `[N]`을 출력한다.
+C++의 합법 수를 적용하여 모델의 추천 수를 실제 대국에 전달한다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install "torch>=2.9,<3" --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install ".[ai]"
+.\.venv\Scripts\python.exe examples\neural_demo.py --simulations 64
+```
+
+예제는 모델의 합법 수 추천, 순수 MCTS 대국 1판에서 만든 자료로 학습 1회,
+모델 저장·복원과 결과 일치를 확인한다. 초기 가중치는 무작위이며, 이 한 번의
+학습으로 기력이 검증된 것은 아니다. 기존 C++ MCTS에는 아직 신경망 추론을
+결합하지 않았다. 입력 평면, 행동 번호와 학습 목표는
+[신경망 연결 안내](docs/neural_network.md)에 있다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan
@@ -183,7 +203,8 @@ print(game.board.to_string())
 - [ ] Bitboard
 - [x] Pure MCTS
 - [x] pybind11
-- [ ] PyTorch Neural Network and Self Play
+- [x] PyTorch input/output contract and model connection
+- [ ] Neural MCTS and reinforcement-learning self play
 - [ ] C++ / LibTorch Self Play
 
 ## Project references
@@ -192,4 +213,5 @@ print(game.board.to_string())
 - [Development plan and implementation choices (한국어)](docs/engine_design.md)
 - [Pure MCTS API and implementation (한국어)](docs/mcts_design.md)
 - [Python bindings and examples (한국어)](docs/python_bindings.md)
+- [PyTorch input/output and model connection (한국어)](docs/neural_network.md)
 - [Online game](https://worldsstone.com)

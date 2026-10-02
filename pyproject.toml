@@ -9,12 +9,15 @@ description = "Great Kingdom 9x9 C++ rules engine and pure MCTS"
 readme = "README.md"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+ai = ["torch>=2.9,<3", "numpy>=2.2,<3"]
+
 [tool.scikit-build]
 minimum-version = "0.11"
 cmake.build-type = "Release"
 build.targets = ["my_board_engine"]
-wheel.packages = []
-sdist.include = ["bindings/**", "engine/**", "mcts/**", "examples/**", "tests/**", "docs/**", "CMakeLists.txt"]
+wheel.packages = ["python/kingdom_ai"]
+sdist.include = ["bindings/**", "engine/**", "mcts/**", "python/**", "examples/**", "tests/**", "docs/**", "CMakeLists.txt"]
 sdist.exclude = [".venv/**", "build*/**", "cmake-build-*/**", "dist/**"]
 
 [tool.scikit-build.cmake.define]

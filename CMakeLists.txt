@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.20)
 project(BoardGameEngine VERSION 0.1.0 LANGUAGES CXX)
 
 option(BUILD_PYTHON_BINDINGS "Build the my_board_engine Python extension" OFF)
+option(BUILD_NEURAL_TESTS "Run optional PyTorch policy/value integration tests" OFF)
+if(BUILD_NEURAL_TESTS AND NOT BUILD_PYTHON_BINDINGS)
+    message(FATAL_ERROR "BUILD_NEURAL_TESTS requires BUILD_PYTHON_BINDINGS=ON")
+endif()
 
 add_library(engine
     engine/src/Board.cpp
@@ -100,5 +104,24 @@ if(BUILD_TESTING)
             --reference "$<TARGET_FILE:binding_reference>"
         )
         set_tests_properties(python_binding_test PROPERTIES TIMEOUT 60)
+        if(BUILD_NEURAL_TESTS)
+            execute_process(COMMAND "${Python_EXECUTABLE}" -c "import torch, numpy"
+                RESULT_VARIABLE neural_dependencies
+                ERROR_VARIABLE neural_import_error
+            )
+            if(NOT neural_dependencies EQUAL 0)
+                message(FATAL_ERROR "PyTorch/NumPy are required for neural tests: ${neural_import_error}")
+            endif()
+            if(WIN32)
+                set(neural_path_separator ";")
+            else()
+                set(neural_path_separator ":")
+            endif()
+            add_test(NAME neural_test COMMAND "${CMAKE_COMMAND}" -E env
+                "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>${neural_path_separator}${CMAKE_CURRENT_SOURCE_DIR}/python"
+                "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/neural_test.py"
+            )
+            set_tests_properties(neural_test PROPERTIES TIMEOUT 60)
+        endif()
     endif()
 endif()
