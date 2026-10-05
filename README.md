@@ -220,6 +220,16 @@ C++의 합법 수를 적용하여 모델의 추천 수를 실제 대국에 전�
 
 ### 신경망 PUCT로 추천 수와 자가 대국 만들기
 
+CPU와 CUDA의 신경망 배치 추론을 같은 모델·탐색 예산으로 비교하려면 다음을 실행한다.
+CUDA용 PyTorch가 필요하며, 이 명령은 종료까지의 실제 대국 처리량을 측정한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\gpu_benchmark.py --games 24 --simulations 32 --workers 12 --batch-sizes 1 12 --repeats 3
+```
+
+설치 환경, 배치 평가 API와 측정 기준은 [GPU 배치 추론 안내](docs/gpu_benchmark.md)에 있다.
+체크포인트를 지정하지 않은 모델은 성능 측정용 초기 가중치다.
+
 C++ PUCT가 신경망 정책을 탐색의 사전 확률로 사용하고, 새로운 잎의 평가값은
 PyTorch 모델에서 받는다. 종료 상태는 모델 대신 C++ 엔진의 확정 승패를
 사용한다. 업데이트한 패키지를 설치한 뒤 다음 예제를 실행한다.
