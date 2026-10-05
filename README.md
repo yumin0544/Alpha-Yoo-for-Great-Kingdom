@@ -35,6 +35,8 @@ neutral stone at its center.
   with NVRTC runtime compilation and the unchanged CPU engine as a rule oracle.
 - Repeated self-play learning with bounded FIFO replay, paired-color strength
   evaluation, champion promotion, metrics, and complete training resume.
+- Optional CUDA batched self-play in `Trainer`, with visit-policy training data,
+  GPU gradient updates, and completed-iteration checkpoint resume.
 
 Bitboard optimization, large-scale learning experiments, and C++/LibTorch
 inference remain the next development stages. Training speed and model strength
@@ -285,8 +287,8 @@ accepted = games.play(result.actions)
 .\.venv\Scripts\python.exe examples\gpu_puct_benchmark.py --games 24 --simulations 32 --workers 12 --gpu-batch-sizes 12 24 --repeats 3
 ```
 
-Python의 커널 호출과 일부 메타데이터 동기화는 남아 있다. 이 실행기는 아직
-`Trainer`의 반복 학습 루프에 자동 연결하지 않았다. 지원 범위, GPU 상태·탐색
+Python의 커널 호출과 일부 메타데이터 동기화는 남아 있다. `Trainer`에서도
+CUDA 자가 대국 경로를 선택할 수 있다. 지원 범위, GPU 상태·탐색
 API와 타이밍 기준은 [GPU PUCT 안내](docs/gpu_puct.md)에 있다.
 
 ### 반복 학습과 중단 후 재개하기
@@ -307,6 +309,24 @@ API와 타이밍 기준은 [GPU PUCT 안내](docs/gpu_puct.md)에 있다.
 중단 후 처음부터 다시 수행한다. 설정과 API는
 [강화학습 루프 안내](docs/training_loop.md)에 있다.
 
+GPU 규칙·PUCT로 128판을 함께 생성하고 GPU에서 가중치를 학습하려면
+자가 대국 경로와 학습 장치를 모두 CUDA로 지정한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
+.\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
+```
+
+학습용 루트 잡음 비율 0.25와 착수 온도 1.0은 기본적으로 켜져 있다.
+자가 대국의 입력·방문 정책·최종 승패는 CPU 자료 버퍼로 회수하고, 승격된
+모델은 다음 반복의 자료 생성에 사용한다. 평가는 기존 C++ 규칙·PUCT로
+순차 대국하며 신경망 추론은 CUDA를 사용한다. CLI와 지표 파일에 실제
+자료 생성 처리량, 학습·평가 시간과 전체 반복 처리량을 기록한다.
+잡음 없는 벤치마크의 36.79판/초를 전체 학습 속도로 가정하지 않는다.
+GPU 재개 시 `--device cuda`를 지정하고 자가 대국 설정은 체크포인트에서
+복원한다. `--self-play-batch-size`는 동시 대국 수이며 `--batch-size`는
+학습 미니배치의 위치 수다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan
@@ -318,6 +338,7 @@ API와 타이밍 기준은 [GPU PUCT 안내](docs/gpu_puct.md)에 있다.
 - [x] Neural PUCT and self-play data generation
 - [x] CUDA game rules, input encoding, and batched PUCT tree search
 - [x] Repeated learning, replay buffer, strength evaluation, and full resume
+- [x] CUDA self-play data connected to the repeated training loop
 - [ ] Large-scale learning experiments and validated playing strength
 - [ ] C++ / LibTorch Self Play
 

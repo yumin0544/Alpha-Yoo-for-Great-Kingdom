@@ -1,4 +1,4 @@
-"""Sequential self-play, replay learning, model evaluation and full resume."""
+"""CPU or batched CUDA self-play, replay learning, evaluation and full resume."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ import torch
 from .checkpoint import save_model
 from .encoding import ACTION_SIZE, BOARD_SIZE, FEATURE_NAMES, FORMAT_VERSION
 from .evaluation import evaluate_models
+from .gpu_puct import GpuPUCTOptions
+from .gpu_training import collect_gpu_puct_games
 from .model import PolicyValueNet
 from .puct import PUCTOptions
 from .replay import ReplayBuffer
@@ -42,16 +44,23 @@ class TrainingConfig:
     evaluation_opening_temperature: float = 1.0
     promotion_threshold: float = 0.55
     seed: int = 42
+    self_play_backend: str = "cpu"
+    self_play_batch_size: int = 128
 
     def __post_init__(self):
         positive_ints = (
             "games_per_iteration", "simulations", "replay_capacity", "batch_size",
             "train_steps_per_iteration", "evaluation_games", "evaluation_simulations",
+            "self_play_batch_size",
         )
         for name in positive_ints:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if type(self.self_play_backend) is not str or self.self_play_backend not in ("cpu", "cuda"):
+            raise ValueError("self_play_backend must be 'cpu' or 'cuda'")
+        if self.self_play_backend == "cuda" and self.simulations > 2 ** 31 - 2:
+            raise ValueError("CUDA simulations must not exceed 2147483646")
         if self.evaluation_games < 2 or self.evaluation_games % 2:
             raise ValueError("evaluation_games must be even and at least two")
         if type(self.evaluation_opening_moves) is not int or self.evaluation_opening_moves < 0:
@@ -78,7 +87,8 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 1
+_CHECKPOINT_VERSION = 2
+_GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
 _SCHEMA = {
     "format_version": FORMAT_VERSION, "board_size": BOARD_SIZE,
     "action_size": ACTION_SIZE, "feature_names": list(FEATURE_NAMES),
@@ -223,6 +233,11 @@ class Trainer:
             raise TypeError("model must be a PolicyValueNet")
         self.config = config
         self.device = torch.device(device)
+        if config.self_play_backend == "cuda":
+            if self.device.type != "cuda":
+                raise ValueError("CUDA self-play requires a CUDA Trainer device (device='cuda')")
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA self-play requires an available CUDA device")
         if model is None:
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(config.seed)
@@ -242,28 +257,54 @@ class Trainer:
     def _next_seed(self):
         return int(torch.randint(2 ** 63 - 1, (1,), generator=self.generator, device="cpu").item())
 
+    def _collect_games(self):
+        config = self.config
+        if config.self_play_backend == "cuda":
+            # Each chunk owns temporary GPU RNG streams seeded from the saved
+            # CPU generator. No unsaved searcher survives an iteration boundary.
+            for offset in range(0, config.games_per_iteration, config.self_play_batch_size):
+                seed = self._next_seed()
+                options = GpuPUCTOptions(
+                    simulations=config.simulations, c_puct=config.c_puct, seed=seed,
+                    dirichlet_alpha=config.dirichlet_alpha,
+                    dirichlet_epsilon=config.dirichlet_epsilon,
+                )
+                count = min(config.self_play_batch_size, config.games_per_iteration - offset)
+                yield from collect_gpu_puct_games(
+                    self.champion, count, options=options, temperature=config.temperature,
+                    seed=seed, batch_size=config.self_play_batch_size, device=self.device,
+                )
+        else:
+            for _ in range(config.games_per_iteration):
+                seed = self._next_seed()
+                options = PUCTOptions(
+                    simulations=config.simulations, c_puct=config.c_puct, seed=seed,
+                    dirichlet_alpha=config.dirichlet_alpha,
+                    dirichlet_epsilon=config.dirichlet_epsilon,
+                )
+                yield collect_puct_game(self.champion, options=options,
+                                        temperature=config.temperature, seed=seed)
+
+    def _synchronize(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
     def run_iteration(self):
         if not self._at_boundary:
             raise RuntimeError("Reload the last checkpoint after an incomplete iteration")
         self._at_boundary = False
+        self._synchronize()
         started = perf_counter()
         config = self.config
         endings = {}
         plies = samples = 0
-        for _ in range(config.games_per_iteration):
-            seed = self._next_seed()
-            options = PUCTOptions(
-                simulations=config.simulations, c_puct=config.c_puct, seed=seed,
-                dirichlet_alpha=config.dirichlet_alpha,
-                dirichlet_epsilon=config.dirichlet_epsilon,
-            )
-            data = collect_puct_game(self.champion, options=options,
-                                     temperature=config.temperature, seed=seed)
+        for data in self._collect_games():
             self.replay.extend(data.samples)
             self.self_play_games += 1
             samples += len(data.samples)
             plies += len(data.samples)
             endings[data.reason.name] = endings.get(data.reason.name, 0) + 1
+        self._synchronize()
         self_play_seconds = perf_counter() - started
         training_started = perf_counter()
         loss_totals = dict.fromkeys(("loss", "policy_loss", "value_loss"), 0.0)
@@ -274,6 +315,7 @@ class Trainer:
             for key in loss_totals:
                 loss_totals[key] += losses[key]
             self.training_steps += 1
+        self._synchronize()
         training_seconds = perf_counter() - training_started
         evaluation_started = perf_counter()
         evaluation = evaluate_models(
@@ -286,8 +328,10 @@ class Trainer:
         if promoted:
             self.champion = deepcopy(self.model).eval()
             self.champion_version += 1
+        self._synchronize()
         evaluation_seconds = perf_counter() - evaluation_started
         self.iteration += 1
+        elapsed_seconds = perf_counter() - started
         metrics = {
             "iteration": self.iteration, "self_play_games": self.self_play_games,
             "training_steps": self.training_steps, "champion_version": self.champion_version,
@@ -298,7 +342,11 @@ class Trainer:
             "evaluation": {**asdict(evaluation), "win_rate": evaluation.win_rate},
             "promoted": promoted, "self_play_seconds": self_play_seconds,
             "training_seconds": training_seconds, "evaluation_seconds": evaluation_seconds,
-            "elapsed_seconds": perf_counter() - started,
+            "elapsed_seconds": elapsed_seconds,
+            "self_play_backend": config.self_play_backend,
+            "self_play_batch_size": config.self_play_batch_size,
+            "self_play_games_per_second": config.games_per_iteration / self_play_seconds,
+            "iteration_games_per_second": config.games_per_iteration / elapsed_seconds,
         }
         # Reject non-finite metrics before permitting a resumable boundary save.
         json.dumps(metrics, allow_nan=False)
@@ -328,12 +376,16 @@ class Trainer:
         payload = torch.load(Path(path), map_location="cpu", weights_only=True)
         if not isinstance(payload, dict) or set(payload) != _CHECKPOINT_KEYS:
             raise ValueError("Unexpected training checkpoint fields")
-        if type(payload["checkpoint_version"]) is not int or payload["checkpoint_version"] != _CHECKPOINT_VERSION:
+        version = payload["checkpoint_version"]
+        if type(version) is not int or version not in (1, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
         if not _same_primitive(payload["schema"], _SCHEMA):
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
-        if not isinstance(raw_config, dict) or set(raw_config) != {field.name for field in fields(TrainingConfig)}:
+        config_keys = {field.name for field in fields(TrainingConfig)}
+        if version == 1:
+            config_keys -= _GPU_CONFIG_KEYS
+        if not isinstance(raw_config, dict) or set(raw_config) != config_keys:
             raise ValueError("Invalid checkpoint training configuration")
         config = TrainingConfig(**raw_config)
         progress = payload["progress"]

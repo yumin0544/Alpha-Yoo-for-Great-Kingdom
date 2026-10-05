@@ -157,13 +157,39 @@ GPU 배치를 넓힌 설정도 별도로 측정할 수 있다. 모델과 대국 
 
 실측값은 [성능 기록](performance.md)에 기록한다. 기존 순수 MCTS와는
 시뮬레이션의 내용·모델 호출 비용이 달라 같은 탐색 횟수로 직접 환산하지 않는다.
-현재 `Trainer`의 반복 자가 대국·자료 축적·학습 루프에는 자동 통합하지 않았다.
+
+## Trainer에서 GPU 자가 대국 사용하기
+
+`Trainer`에 `self_play_backend="cuda"`와 `device="cuda"`를 지정하면 GPU 규칙과
+배치 PUCT로 자료를 생성한 뒤 CPU FIFO 버퍼에 저장하고 CUDA에서 미니배치
+가중치 갱신을 수행한다. 루트 잡음과 방문 수 착수 샘플링을 적용하며 기본값은
+잡음 비율 0.25, alpha 0.3, 온도 1.0이다. 정책 목표는 실제 방문 비율, 가치
+목표는 착수 전 플레이어 관점의 최종 승패다. 승격된 기준 모델은 다음 자료
+수집 호출부터 새 GPU 탐색기에 반영한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
+.\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
+```
+
+자가 대국 배치 크기·탐색·학습 설정은 완료 반복 체크포인트에 저장한다.
+재개할 때는 이 설정을 복원하고 완료 반복 경계의 난수 상태로 다음 배치를
+생성한다. 진행 중이던 반복은 마지막 체크포인트부터 다시 수행한다.
+평가 대국은 기존 C++ 규칙·PUCT를 순차 실행하고 신경망만 CUDA에서 평가한다.
+Python의 커널 호출·자료 CPU 회수·일부 동기화도 학습 흐름에 포함된다.
+
+위 명령은 학습 시작 설정 예시다. 잡음 없이 측정했던 GPU 자가 대국
+36.79판/초와 실제 학습 처리량은 별도로 측정한다. CLI는 자료 생성 처리량과
+자료 생성·학습·평가 단계 시간, 전체 반복 처리량을 출력한다. 저장·재개 범위와
+지표 정의는 [강화학습 루프 안내](training_loop.md)에 있다.
 
 ## 검증과 구현 위치
 
 ```powershell
 .\.venv\Scripts\python.exe tests\gpu_rules_test.py
 .\.venv\Scripts\python.exe tests\gpu_puct_test.py
+.\.venv\Scripts\python.exe tests\gpu_training_test.py
+.\.venv\Scripts\python.exe tests\gpu_trainer_test.py
 ```
 
 규칙 검증은 GPU 상태 전이, 합법 수, 입력 평면과 실제 종료 대국을 CPU 엔진과
@@ -180,7 +206,13 @@ GPU 배치를 넓힌 설정도 별도로 측정할 수 있다. 모델과 대국 
 - `python/kingdom_ai/gpu_runtime.py`: NVRTC 컴파일과 CUDA Driver API 호출.
 - `python/kingdom_ai/gpu_rules.py`: GPU 상태·규칙·합법 수·입력 인코딩.
 - `python/kingdom_ai/gpu_puct.py`: GPU 트리와 정책·가치 추론 연결.
+- `python/kingdom_ai/gpu_training.py`: GPU 학습 자료 생성과 CPU 버퍼 형식 변환.
+- `python/kingdom_ai/loop.py`: GPU 자료 수집 선택과 학습·평가·저장 재개.
 - `examples/gpu_puct_benchmark.py`: 완료 대국 측정과 CPU 기준 리플레이 검증.
 
 위 구현은 모두 `engine/` 밖에 추가한다. 기존 엔진은 읽기 전용 검증 기준으로
 유지한다.
+
+Trainer 연결 후 GPU 학습 자료 테스트 6개와 연결·재개 테스트 5개를 추가했다.
+기존 검사를 포함한 CTest 17개 묶음이 통과했고, 같은 결정적 CUDA 환경에서
+연속 학습과 저장 후 재개의 자료·가중치·Adam·버퍼·난수 상태가 일치했다.

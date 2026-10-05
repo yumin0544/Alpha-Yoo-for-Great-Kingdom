@@ -27,6 +27,8 @@ def main():
     source.add_argument("--resume", type=Path, help="전체 학습 체크포인트 latest.pt")
     source.add_argument("--initial-model", type=Path, help="새 학습에 사용할 기존 모델 가중치")
     parser.add_argument("--device", default="cpu", help="cpu 또는 사용 가능한 cuda 장치")
+    parser.add_argument("--self-play-backend", choices=("cpu", "cuda"),
+                        help="자가 대국 규칙·탐색 장치 (기본 cpu); cuda는 --device cuda 필요")
     parser.add_argument("--threads", type=positive_integer, default=1,
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
     parser.add_argument("--channels", type=positive_integer, help="새 모델 채널 수 (기본 32)")
@@ -36,6 +38,7 @@ def main():
         "replay-capacity": "replay_capacity", "batch-size": "batch_size",
         "train-steps": "train_steps_per_iteration", "eval-games": "evaluation_games",
         "eval-simulations": "evaluation_simulations",
+        "self-play-batch-size": "self_play_batch_size",
     }
     real_flags = {
         "c-puct": "c_puct", "dirichlet-alpha": "dirichlet_alpha",
@@ -97,6 +100,12 @@ def main():
             f"버퍼 {row['replay_size']}개, 손실 {row['loss']:.5f}, "
             f"평가 {evaluation['wins']}/{evaluation['games']} "
             f"({evaluation['win_rate']:.1%}), 승격 {row['promoted']}, "
+            f"자가 대국 {row['self_play_backend']} "
+            f"{row['self_play_games_per_second']:.2f}판/초, "
+            f"전체 반복 {row['iteration_games_per_second']:.2f}판/초, "
+            f"자료 생성 {row['self_play_seconds']:.2f}초, "
+            f"학습 {row['training_seconds']:.2f}초, "
+            f"평가 {row['evaluation_seconds']:.2f}초, "
             f"경과 {row['elapsed_seconds']:.2f}초", flush=True,
         )
 
