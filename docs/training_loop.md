@@ -133,6 +133,52 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 기존 `--resume`은 저장된 배치 크기와 반복당 판수를 복원하며 설정 변경을
 허용하지 않는다.
 
+### 자료 보존과 학습량을 함께 늘리는 설정
+
+`runs/gpu-r1`의 1024판 실행은 27,079개 위치를 생성했지만 버퍼가 10,000개여서
+17,079개가 학습 전에 밀려났다. 미니배치 64개·갱신 32회는 복원추출
+2,048회에 해당한다. 평가 20판·탐색 32회는 53.28초로 반복 시간의 약 52%였다.
+
+같은 저장 버퍼에서 32,768개 위치를 추출하는 CUDA 학습을 배치별로 두 번씩
+측정했다. 배치 64/128/256/512의 중앙 시간은 각각 6.638/3.784/1.968/1.102초였다.
+배치 512는 이 측정 범위에서 위치 처리 속도가 가장 높았다. 갱신 횟수가 서로
+다르므로 이 결과로 기력이나 수렴 속도가 더 좋다고 판단하지 않는다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\training_batch_benchmark.py --checkpoint runs\gpu-r1\latest.pt --sample-draws 32768 --repeats 2 --output runs\training-batch-comparison.jsonl
+```
+
+측정에는 버퍼 추출·GPU 전송·학습을 포함하며 준비와 파일 저장은 제외한다.
+입력 체크포인트는 수정하지 않고, 비교용 모델은 저장하지 않는다.
+
+자료 손실을 줄이고 평가 비용을 더 많은 자가 대국에 분산하는 시작 설정이다.
+자가 대국은 여전히 한 묶음에 1024판이며, 두 묶음을 끝낸 뒤 학습한다.
+학습은 512개 위치·128회 갱신으로 총 65,536회 복원추출한다. 모든 위치를
+한 번씩 학습하는 보장은 없다. 평가 20판·탐색 32회와 승격 기준 0.55는 유지한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 1024 --iterations 1 --games-per-iteration 2048 --simulations 32 --replay-capacity 131072 --train-steps 128 --batch-size 512 --eval-games 20 --eval-simulations 32 --threads 1 --initial-model runs\gpu-r1\best.pt --output runs\gpu-r1-tuned
+```
+
+버퍼는 CPU 메모리를 최대 약 457MiB 사용하고, 채워진 버퍼가 체크포인트에
+저장되므로 디스크 사용과 저장 시간도 늘어난다. 131,072개는 관측한 평균
+수순을 바탕으로 정한 용량이며, 모든 가능한 2048판 수순의 위치를 보존하는
+상한은 아니다. 반복이 이어지면 오래된 위치부터 교체한다.
+
+이 설정으로 실제 2048판·학습 128회·평가 20판을 완료했다. 생성한 52,377개
+위치를 모두 보존했고, 자료 생성은 22.07판/초, 학습·평가 포함 반복 처리량은
+12.59판/초였다. 기존 기준 모델 상대 15승 5패로 새 모델을 승격했다.
+파일 저장은 처리량에서 제외하며, 이전 실행과 출발 가중치가 다르므로
+설정 변경의 효과만을 분리한 비교는 아니다. [상세 실측](performance.md)에
+시간·자료 보존·체크포인트 검증을 기록했다.
+
+이 실행은 기존 기준 모델의 가중치를 가져오며 optimizer와 버퍼는 새로
+시작한다. 완료된 설정을 그대로 이어갈 때는 다음 명령을 사용한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-r1-tuned\latest.pt --iterations 10 --output runs\gpu-r1-tuned
+```
+
 ## 설정
 
 | CLI 옵션 | 기본값 | 의미 |
