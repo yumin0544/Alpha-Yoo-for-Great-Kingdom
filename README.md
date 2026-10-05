@@ -31,6 +31,8 @@ neutral stone at its center.
   output, legal-move masking, MCTS teacher data, one-step training, and checkpoints.
 - Neural PUCT with C++ tree search, PyTorch leaf evaluation, optional root noise,
   and visit-based self-play data compatible with the existing training API.
+- Independent CUDA game rules, observation encoding, and batched PUCT trees,
+  with NVRTC runtime compilation and the unchanged CPU engine as a rule oracle.
 - Repeated self-play learning with bounded FIFO replay, paired-color strength
   evaluation, champion promotion, metrics, and complete training resume.
 
@@ -258,6 +260,35 @@ if recommendation.best_move is not None:
 잡음과 방문 수에 따른 행동 샘플링을 제공한다. 탐색은 입력 대국을 바꾸지
 않는다. API, 값의 관점과 학습 자료 계약은 [PUCT 설계](docs/puct_design.md)에 있다.
 
+### 규칙과 PUCT 트리까지 GPU에서 실행하기
+
+`GpuStateBatch`와 `GpuPUCT`는 규칙·합법 수·입력 인코딩·트리 선택·확장·역전파와
+신경망 추론을 CUDA에서 수행한다. 기존 CPU 엔진은 변경하지 않고 결과 검증의
+기준으로 사용한다. CUDA용 PyTorch에 포함된 NVRTC로 커널을 실행하며 이 GPU
+경로에는 별도 CUDA Toolkit이나 C++ 컴파일러 설치가 필요하지 않다.
+
+```python
+from kingdom_ai import GpuStateBatch, GpuPUCT, GpuPUCTOptions, PolicyValueNet
+
+games = GpuStateBatch.initial(12)
+searcher = GpuPUCT(
+    PolicyValueNet(), GpuPUCTOptions(simulations=32, dirichlet_epsilon=0.0)
+)
+result = searcher.search(games)
+accepted = games.play(result.actions)
+```
+
+같은 모델과 탐색 예산으로 CPU 기준과 GPU의 실제 완료 대국을 비교한다.
+기본 루트 잡음은 0이며 GPU 대국 기록은 측정 후 CPU 엔진으로 검증한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\gpu_puct_benchmark.py --games 24 --simulations 32 --workers 12 --gpu-batch-sizes 12 24 --repeats 3
+```
+
+Python의 커널 호출과 일부 메타데이터 동기화는 남아 있다. 이 실행기는 아직
+`Trainer`의 반복 학습 루프에 자동 연결하지 않았다. 지원 범위, GPU 상태·탐색
+API와 타이밍 기준은 [GPU PUCT 안내](docs/gpu_puct.md)에 있다.
+
 ### 반복 학습과 중단 후 재개하기
 
 현재 기준 모델의 자가 대국을 FIFO 버퍼에 축적하고, 후보를 미니배치로 학습한
@@ -285,6 +316,7 @@ if recommendation.best_move is not None:
 - [x] pybind11
 - [x] PyTorch input/output contract and model connection
 - [x] Neural PUCT and self-play data generation
+- [x] CUDA game rules, input encoding, and batched PUCT tree search
 - [x] Repeated learning, replay buffer, strength evaluation, and full resume
 - [ ] Large-scale learning experiments and validated playing strength
 - [ ] C++ / LibTorch Self Play
@@ -297,5 +329,6 @@ if recommendation.best_move is not None:
 - [Python bindings and examples (한국어)](docs/python_bindings.md)
 - [PyTorch input/output and model connection (한국어)](docs/neural_network.md)
 - [Neural PUCT search and self-play data (한국어)](docs/puct_design.md)
+- [CUDA game rules and batched PUCT search (한국어)](docs/gpu_puct.md)
 - [Repeated learning, evaluation, and resume (한국어)](docs/training_loop.md)
 - [Online game](https://worldsstone.com)

@@ -8,6 +8,8 @@ from .encoding import (
 from .model import PolicyValueNet, masked_policy
 from .inference import NeuralAgent, Prediction
 from .batching import BatchedEvaluator
+from .gpu_rules import GpuStateBatch
+from .gpu_puct import GpuPUCT, GpuPUCTOptions, GpuSearchResult
 from .checkpoint import load_model, save_model
 from .puct import PUCT, PUCTOptions, PUCTSearchResult, sample_visits
 from .training import (
@@ -23,6 +25,7 @@ __all__ = [
     "PASS_ACTION", "EncodedState", "action_to_move", "encode_state", "move_to_action",
     "terminal_value", "visit_policy", "PolicyValueNet", "masked_policy", "NeuralAgent",
     "Prediction", "BatchedEvaluator", "load_model", "save_model", "GameData", "Losses", "TrainingBatch",
+    "GpuStateBatch", "GpuPUCT", "GpuPUCTOptions", "GpuSearchResult",
     "TrainingSample", "collect_mcts_game", "collect_puct_game", "make_batch", "policy_value_loss", "train_step",
     "PUCT", "PUCTOptions", "PUCTSearchResult", "sample_visits",
     "ReplayBuffer", "EvaluationResult", "evaluate_models", "Trainer", "TrainingConfig",
