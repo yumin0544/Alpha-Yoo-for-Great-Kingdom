@@ -183,6 +183,23 @@ print(game.board.to_string())
 [Python 바인딩 안내](docs/python_bindings.md)에 있다. 기본 C++ 빌드는 Python
 패키지 설치 없이 계속 사용할 수 있다.
 
+### 여러 코어로 순수 MCTS 자가 대국 실행하기
+
+`--workers`로 동시에 진행할 대국 수를 지정한다. 각 대국은 별도 상태와
+MCTS 객체를 사용하며, C++ 탐색 중에는 Python GIL을 해제한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\python_benchmark.py --games 1000 --simulations 64 --workers 12
+# 같은 대국을 작업자 수별로 비교하고, 세 번 측정한 처리량의 중앙값을 출력한다.
+.\.venv\Scripts\python.exe examples\python_benchmark.py --games 240 --simulations 64 --workers 1 2 4 6 12 --repeats 3
+```
+
+`--games`는 전체 완료 대국 수이며, `--workers` 기본값은 1이다.
+각 판의 시드는 작업자 수와 관계없이 `seed + 판 번호`로 정한다. 결과 출력에는
+완료 판수, 평균 수순, 내부 탐색 횟수와 결과 검증값이 포함된다.
+이 명령은 신경망 없는 순수 MCTS를 실행한다. 실측 조건과 결과는
+[처리 속도 기록](docs/performance.md)에 있다.
+
 ### PyTorch 모델 연결 확인하기
 
 입력은 현재 플레이어 관점의 `[N, 10, 9, 9]` 텐서다. 모델은 보드 81칸과

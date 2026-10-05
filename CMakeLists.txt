@@ -105,6 +105,11 @@ if(BUILD_TESTING)
             --reference "$<TARGET_FILE:binding_reference>"
         )
         set_tests_properties(python_binding_test PROPERTIES TIMEOUT 60)
+        add_test(NAME parallel_benchmark_test COMMAND "${CMAKE_COMMAND}" -E env
+            "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>"
+            "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/parallel_benchmark_test.py"
+        )
+        set_tests_properties(parallel_benchmark_test PROPERTIES TIMEOUT 60)
         if(BUILD_NEURAL_TESTS)
             execute_process(COMMAND "${Python_EXECUTABLE}" -c "import torch, numpy"
                 RESULT_VARIABLE neural_dependencies
