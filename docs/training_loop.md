@@ -188,6 +188,10 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `best.pt` | 현재 champion의 스키마·모델 구성·가중치 | 기존 `load_model` |
 | `metrics.jsonl` | 완료한 반복마다 한 줄의 JSON 지표 | 일반 JSON Lines 도구 |
 
+저장한 `best.pt`와 사람이 직접 대국하려면 `examples/play_ai.py`를 사용한다.
+현재 저장 자료의 위치와 범위, CPU·CUDA 대국 실행과 입력 방법은
+[직접 대국 안내](play_ai.md)에 기록한다.
+
 `latest.pt`는 모델 가중치만 저장하던 파일과 형식이 다르다. 두 종류는 서로의
 복원 API로 읽지 않는다. 전체 체크포인트는 `weights_only=True`로 읽고 입력
 스키마, 가중치·Adam·버퍼·진행 횟수·난수 상태의 일관성을 검증한다.

@@ -327,6 +327,19 @@ GPU 재개 시 `--device cuda`를 지정하고 자가 대국 설정은 체크포
 복원한다. `--self-play-batch-size`는 동시 대국 수이며 `--batch-size`는
 학습 미니배치의 위치 수다.
 
+### 학습된 모델과 직접 대국하기
+
+저장한 `best.pt`를 읽어 사람 대 AI 콘솔 대국을 진행한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\play_ai.py --checkpoint runs\gpu-trainer-validation-2026-10-05\best.pt --human black --device cuda
+```
+
+`3 4`처럼 1부터 시작하는 행·열로 착수하고 `pass`로 패스한다. `--human white`로
+사람이 후공을 선택하고, `--device cpu`로 CPU를 사용할 수 있다. 종료 후 `r`로
+새 대국, `q`로 프로그램을 끝낸다. 현재 저장 자료의 위치·범위와 실행 방법은
+[직접 대국 안내](docs/play_ai.md)에 있다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan
@@ -352,4 +365,5 @@ GPU 재개 시 `--device cuda`를 지정하고 자가 대국 설정은 체크포
 - [Neural PUCT search and self-play data (한국어)](docs/puct_design.md)
 - [CUDA game rules and batched PUCT search (한국어)](docs/gpu_puct.md)
 - [Repeated learning, evaluation, and resume (한국어)](docs/training_loop.md)
+- [Play a saved model as a human (한국어)](docs/play_ai.md)
 - [Online game](https://worldsstone.com)
