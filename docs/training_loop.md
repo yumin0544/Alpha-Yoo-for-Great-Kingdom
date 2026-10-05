@@ -96,6 +96,43 @@ CUDA용 PyTorch와 호환 드라이버가 설치된 환경에서 자가 대국 �
 동시에 진행할 대국 수이고, `--batch-size`는 가중치 갱신에 사용하는 위치 수다.
 `--threads`는 PyTorch CPU 연산 스레드 설정이며 GPU 동시 대국 수와 별개다.
 
+### GPU 동시 대국 배치 늘리기
+
+`--self-play-batch-size`로 동시 대국 상한을 늘린다. 한 반복의 대국 수인
+`--games-per-iteration`도 그 이상이어야 실제로 그 크기의 배치를 사용한다.
+예를 들어 반복당 128판을 설정한 상태에서 배치 상한만 1024로 바꾸면 실제로는
+128판을 함께 실행한다. `--batch-size`는 별도의 가중치 갱신용 위치 수다.
+
+같은 초기 가중치에서 동시 대국 배치만 비교하는 실행기를 제공한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\gpu_trainer_benchmark.py --games 1024 --batch-sizes 128 256 512 1024 --repeats 1 --initial-model runs\gpu-trainer-validation-2026-10-05\best.pt --output runs\batch-scaling.jsonl
+```
+
+각 설정은 같은 가중치에서 새 버퍼·optimizer로 한 번씩 시작한다. 수당 32회
+탐색, 루트 잡음 0.25, 착수 온도 1, 학습 미니배치 64개·갱신 8회, 평가 2판을
+사용한다. 준비 작업을 제외한 자료 생성·버퍼 저장·학습·평가 시간과 최대 GPU
+tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 포함하지 않는다.
+동시 대국 묶음이 달라지면 난수 소비와 수순도 달라지므로 생성 위치 수와
+평균 수순을 함께 비교한다. 실제 결과는 [성능 기록](performance.md)에 있다.
+
+현재 모델·32회 탐색 조건에서는 배치 1024개로 실제 자료 생성·CUDA 학습·평가를
+완료했고, 자료 생성 23.03판/초와 학습·평가 포함 22.13판/초를 측정했다.
+같은 1024판 생성 조건의 배치 128개는 각각 11.38판/초와 10.75판/초였다.
+각 설정 1회 실측이며 파일 저장 시간은 제외한다.
+
+현재 환경의 기준 모델 가중치에서 배치를 늘린 새 실행을 시작하는 예시다.
+자가 대국 배치 크기와 반복당 판수는 1024개, 가중치 갱신용 미니배치는 64개다.
+새 실행이므로 optimizer와 버퍼는 새로 구성한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 1024 --games-per-iteration 1024 --simulations 32 --batch-size 64 --eval-games 20 --eval-simulations 32 --initial-model runs\gpu-trainer-validation-2026-10-05\best.pt --output runs\gpu-1024
+```
+
+이 시작 예시는 평가 20판을 지정한다. 위 처리량 실측은 평가 2판을 사용했다.
+기존 `--resume`은 저장된 배치 크기와 반복당 판수를 복원하며 설정 변경을
+허용하지 않는다.
+
 ## 설정
 
 | CLI 옵션 | 기본값 | 의미 |
