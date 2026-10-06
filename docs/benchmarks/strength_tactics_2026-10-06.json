@@ -1,0 +1,82 @@
+{
+  "measured_date": "2026-10-06",
+  "timezone": "Asia/Seoul",
+  "model": {
+    "path": "runs/gpu-r1-tuned/best.pt",
+    "absolute_path": "C:/Users/qwert/OneDrive/문서/GitHub/Alpha-Yoo-for-Great-Kingdom/runs/gpu-r1-tuned/best.pt",
+    "checkpoint_bytes": 233170,
+    "checkpoint_sha256_at_audit": "4362813c5a5723732cb8a37f4b6d38c575933d5358748000759700891488d865",
+    "weights_changed_for_comparison": false
+  },
+  "environment": {
+    "python": ".venv/Scripts/python.exe",
+    "package_source": "python/kingdom_ai",
+    "torch": "2.9.1+cu126",
+    "cuda_runtime": "12.6",
+    "gpu": "NVIDIA GeForce RTX 3050",
+    "device": "cuda:0",
+    "torch_cpu_threads": 1
+  },
+  "root_exploration": {
+    "description": "32 independent initial states, identical weights, fresh searcher per setting; no self-play or optimization steps. Entropy is the natural-log entropy of normalized root visits.",
+    "batch_size": 32,
+    "c_puct": 1.5,
+    "dirichlet_alpha": 0.3,
+    "dirichlet_epsilon": 0.25,
+    "seed": 103,
+    "tactical_checks": false,
+    "runs": [
+      {"fpu_reduction": null, "simulations": 32, "mean_visited": 1.0, "mean_entropy": 0.0, "mean_top1": 1.0, "unique_actions": 1, "root_value": 0.9866939783096313},
+      {"fpu_reduction": null, "simulations": 128, "mean_visited": 1.03125, "mean_entropy": 0.007951454259455204, "mean_top1": 0.997802734375, "unique_actions": 1, "root_value": 0.9855172038078308},
+      {"fpu_reduction": 0.0, "simulations": 32, "mean_visited": 2.15625, "mean_entropy": 0.16314759850502014, "mean_top1": 0.962890625, "unique_actions": 1, "root_value": 0.984416663646698},
+      {"fpu_reduction": 0.0, "simulations": 128, "mean_visited": 12.59375, "mean_entropy": 0.6264700889587402, "mean_top1": 0.884521484375, "unique_actions": 1, "root_value": 0.9775874614715576},
+      {"fpu_reduction": 0.1, "simulations": 32, "mean_visited": 1.28125, "mean_entropy": 0.04207118973135948, "mean_top1": 0.990234375, "unique_actions": 1, "root_value": 0.98748779296875},
+      {"fpu_reduction": 0.1, "simulations": 128, "mean_visited": 6.25, "mean_entropy": 0.3492463231086731, "mean_top1": 0.93212890625, "unique_actions": 1, "root_value": 0.9838306307792664},
+      {"fpu_reduction": 0.25, "simulations": 32, "mean_visited": 1.03125, "mean_entropy": 0.007305989507585764, "mean_top1": 0.998046875, "unique_actions": 1, "root_value": 0.9966129660606384},
+      {"fpu_reduction": 0.25, "simulations": 128, "mean_visited": 2.8125, "mean_entropy": 0.16591989994049072, "mean_top1": 0.965087890625, "unique_actions": 1, "root_value": 0.9886483550071716}
+    ]
+  },
+  "tactical_positions": {
+    "description": "Eight rotations/reflections of a sparse immediate-capture position and eight of the user's reported defense position. Each comparison uses identical saved weights. These are tactical diagnostics, not a measured Elo or full-game match.",
+    "simulations": 128,
+    "c_puct": 1.5,
+    "dirichlet_epsilon": 0.0,
+    "seed": 42,
+    "capture_fixture_one_based": {
+      "black_stones": [[1, 2], [2, 1], [3, 2]],
+      "white_stones": [[2, 2]],
+      "neutral": [5, 5],
+      "to_play": "Black",
+      "winning_move": [2, 3]
+    },
+    "defense_fixture_one_based": {
+      "opening": [[4, 8], [5, 8], [2, 8], [6, 8], [2, 4], [4, 4], [6, 2], [4, 7], [3, 7], [5, 9], [4, 6]],
+      "to_play": "White",
+      "unique_safe_move": [5, 7],
+      "cpp_oracle_safe_moves": 1,
+      "cpp_oracle_unsafe_moves": 69
+    },
+    "expected_actions_zero_based": [11, 25, 69, 55, 15, 61, 65, 19, 42, 58, 38, 22, 38, 22, 42, 58],
+    "runs": [
+      {"tactical_checks": false, "fpu_reduction": null, "capture_correct": 6, "capture_cases": 8, "defense_correct": 0, "defense_cases": 8, "selected_actions": [11, 25, 53, 55, 35, 61, 65, 19, 35, 49, 55, 29, 60, 46, 75, 74]},
+      {"tactical_checks": true, "fpu_reduction": null, "capture_correct": 8, "capture_cases": 8, "defense_correct": 8, "defense_cases": 8, "selected_actions": [11, 25, 69, 55, 15, 61, 65, 19, 42, 58, 38, 22, 38, 22, 42, 58]},
+      {"tactical_checks": true, "fpu_reduction": 0.0, "capture_correct": 8, "capture_cases": 8, "defense_correct": 8, "defense_cases": 8, "selected_actions": [11, 25, 69, 55, 15, 61, 65, 19, 42, 58, 38, 22, 38, 22, 42, 58]}
+    ]
+  },
+  "adversarial_prior_diagnostic": {
+    "description": "Zero-valued fixed-logit model assigns logit -20 to the immediate capture (action 11) and zero to other actions; 76 legal candidates in the sparse fixture. Legacy search never visits the winning action at either tested budget.",
+    "dirichlet_epsilon": 0.0,
+    "runs": [
+      {"simulations": 32, "selected_action": 2, "winning_action": 11, "winning_action_visits": 0},
+      {"simulations": 128, "selected_action": 2, "winning_action": 11, "winning_action_visits": 0}
+    ]
+  },
+  "verification": {
+    "command": "$env:PYTHONPATH=Join-Path $PWD 'python'; .\\.venv\\Scripts\\python.exe tests/gpu_puct_test.py",
+    "test_cases": 16,
+    "passed": 16,
+    "seconds": 32.345,
+    "engine_files_modified": false,
+    "checks": ["legacy exact C++ visit agreement", "low-prior captures for both colors and eight board symmetries", "actual last-liberty defense and independent C++ reply enumeration", "capture-before-suicide", "suicide legality preserved", "second-pass scoring", "no-safe-move fallback", "terminal lanes", "root noise", "FPU exploration", "policy and visit counters", "source model and state preservation", "CUDA stream ordering"]
+  }
+}

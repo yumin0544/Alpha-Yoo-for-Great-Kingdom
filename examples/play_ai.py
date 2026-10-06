@@ -11,6 +11,7 @@ from kingdom_ai import (
     GpuPUCT, GpuPUCTOptions, GpuStateBatch, PUCT, PUCTOptions,
     action_to_move, load_model,
 )
+from kingdom_ai.tactics import analyze_tactics, select_tactical_move
 
 
 HELP = (
@@ -75,11 +76,16 @@ def print_board(game):
 
 
 class Opponent:
-    def __init__(self, model, device, simulations, seed):
+    def __init__(self, model, device, simulations, seed, *, tactical_checks=True,
+                 fpu_reduction=0.0):
         self.device = torch.device(device)
+        if type(tactical_checks) is not bool:
+            raise TypeError("tactical_checks must be a bool")
+        self.tactical_checks = tactical_checks
         if self.device.type == "cuda":
             self.searcher = GpuPUCT(model, GpuPUCTOptions(
                 simulations=simulations, seed=seed, dirichlet_epsilon=0.0,
+                tactical_checks=tactical_checks, fpu_reduction=fpu_reduction,
             ), device=self.device)
         elif self.device.type == "cpu":
             self.searcher = PUCT(model, PUCTOptions(
@@ -92,7 +98,11 @@ class Opponent:
         if self.device.type == "cuda":
             result = self.searcher.search(GpuStateBatch.from_engine([game], device=self.device))
             return action_to_move(int(result.actions[0].item()))
-        move = self.searcher.search(game).best_move
+        choices = analyze_tactics(game) if self.tactical_checks else None
+        if choices is not None and choices.winning_actions:
+            return action_to_move(min(choices.winning_actions))
+        result = self.searcher.search(game)
+        move = select_tactical_move(result, choices) if choices is not None else result.best_move
         if move is None:
             raise RuntimeError("진행 중인 대국에서 AI가 수를 반환하지 않았습니다.")
         return move
@@ -159,13 +169,19 @@ def main():
                         help="AI의 한 수당 탐색 횟수 (기본 128)")
     parser.add_argument("--threads", type=positive_integer, default=1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--tactical-checks", action=argparse.BooleanOptionalAction, default=True,
+                        help="즉시 승리와 상대의 다음 한 수 승리를 검사 (기본 켬)")
+    parser.add_argument("--fpu-reduction", type=float, default=0.0,
+                        help="GPU 미방문 수의 초기 평가 감소량 (기본 0.0)")
     args = parser.parse_args()
     if not 0 <= args.seed < 2 ** 64:
         parser.error("시드는 0 이상, 2^64 미만이어야 합니다.")
     torch.set_num_threads(args.threads)
     try:
         model = load_model(args.checkpoint, device="cpu")
-        opponent = Opponent(model, args.device, args.simulations, args.seed)
+        opponent = Opponent(model, args.device, args.simulations, args.seed,
+                            tactical_checks=args.tactical_checks,
+                            fpu_reduction=args.fpu_reduction)
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(f"모델을 읽거나 대국을 준비하지 못했습니다: {error}")
     print(f"대국 모델: {args.checkpoint.resolve()}")

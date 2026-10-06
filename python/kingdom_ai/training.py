@@ -64,8 +64,25 @@ def collect_mcts_game(simulations=64, seed=42) -> GameData:
     return GameData(samples, winner, game.result.reason)
 
 
-def collect_puct_game(model, options=None, temperature=1.0, seed=42) -> GameData:
-    """Play both sides with neural PUCT and label PRE-MOVE player outcomes."""
+def _validate_temperature_schedule(temperature_moves, final_temperature):
+    if temperature_moves is not None and (type(temperature_moves) is not int
+                                          or temperature_moves < 0):
+        raise ValueError("temperature_moves must be None or a non-negative integer")
+    if not isinstance(final_temperature, (int, float)) or isinstance(final_temperature, bool):
+        raise TypeError("Final temperature must be a real number")
+    if not math.isfinite(final_temperature) or final_temperature < 0:
+        raise ValueError("Final temperature must be finite and non-negative")
+
+
+def collect_puct_game(model, options=None, temperature=1.0, seed=42, *,
+                      temperature_moves=None, final_temperature=0.0) -> GameData:
+    """Play both sides with neural PUCT and label PRE-MOVE player outcomes.
+
+    With ``temperature_moves=None`` the original temperature applies throughout
+    the game. Otherwise only the first ``temperature_moves`` plies use it, and
+    subsequent moves use ``final_temperature``. Policy targets remain the raw
+    root visit proportions at either temperature.
+    """
     from .puct import PUCT, PUCTOptions, sample_visits
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 64:
         raise ValueError("Seed must be an unsigned 64-bit integer")
@@ -73,6 +90,7 @@ def collect_puct_game(model, options=None, temperature=1.0, seed=42) -> GameData
         raise TypeError("Temperature must be a real number")
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("Temperature must be finite and non-negative")
+    _validate_temperature_schedule(temperature_moves, final_temperature)
     if options is None:
         options = PUCTOptions(seed=seed, dirichlet_epsilon=0.25)
     searcher = PUCT(model, options)
@@ -83,7 +101,9 @@ def collect_puct_game(model, options=None, temperature=1.0, seed=42) -> GameData
         encoded = encode_state(game)
         search = searcher.search(game)
         policy = visit_policy(search, game)
-        move = sample_visits(search, temperature=temperature, generator=generator)
+        move_temperature = (temperature if temperature_moves is None
+                            or len(positions) < temperature_moves else final_temperature)
+        move = sample_visits(search, temperature=move_temperature, generator=generator)
         positions.append((encoded, policy))
         if not game.play(move).accepted():
             raise RuntimeError("PUCT failed to produce an accepted game move")

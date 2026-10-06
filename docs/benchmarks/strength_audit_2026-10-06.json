@@ -1,0 +1,259 @@
+{
+  "audit_date": "2026-10-06",
+  "sources": {
+    "metrics": "runs/gpu-r1-tuned/metrics.jsonl",
+    "full_checkpoint": "runs/gpu-r1-tuned/latest.pt",
+    "champion": "runs/gpu-r1-tuned/best.pt"
+  },
+  "method": {
+    "checkpoint_load": "Single torch.load(weights_only=True,map_location=cpu); torch CPU threads 1",
+    "retained_game_count": "Every replay row with zero own/opponent stones and black to play is an initial game position; the oldest retained game may be partial.",
+    "policy_entropy": "Natural logarithm; zero-probability terms treated as zero.",
+    "model_inference": "Champion on CPU; initial state and all 81 legal first moves, without search or completed games."
+  },
+  "progress": {
+    "iteration": 243,
+    "self_play_games": 497664,
+    "training_steps": 31104,
+    "champion_version": 106,
+    "generated_positions_total": 7699640,
+    "sampled_positions_total": 15925248,
+    "promotion_count": 106
+  },
+  "training_config": {
+    "games_per_iteration": 2048,
+    "simulations": 32,
+    "self_play_batch_size": 1024,
+    "replay_capacity": 131072,
+    "batch_size": 512,
+    "train_steps_per_iteration": 128,
+    "temperature": 1.0,
+    "dirichlet_alpha": 0.3,
+    "dirichlet_epsilon": 0.25,
+    "evaluation_games": 20,
+    "evaluation_simulations": 32,
+    "promotion_threshold": 0.55,
+    "channels": 32,
+    "residual_blocks": 2
+  },
+  "periods": [
+    {
+      "first_iteration": 1,
+      "last_iteration": 20,
+      "iterations": 20,
+      "self_play_games": 40960,
+      "promotions": 13,
+      "mean_plies": 21.397900390625,
+      "mean_loss": 3.51233854778111,
+      "mean_policy_loss": 2.7553458949550986,
+      "mean_value_loss": 0.7569926511961966,
+      "candidate_evaluation_black_win_rate": 0.635,
+      "candidate_evaluation_white_win_rate": 0.525,
+      "self_play_endings": {
+        "Capture": 40532,
+        "Suicide": 382,
+        "TwoPasses": 46
+      }
+    },
+    {
+      "first_iteration": 21,
+      "last_iteration": 60,
+      "iterations": 40,
+      "self_play_games": 81920,
+      "promotions": 27,
+      "mean_plies": 17.32884521484375,
+      "mean_loss": 2.588580631557852,
+      "mean_policy_loss": 2.179666913743131,
+      "mean_value_loss": 0.4089137159084203,
+      "candidate_evaluation_black_win_rate": 0.6675,
+      "candidate_evaluation_white_win_rate": 0.48,
+      "self_play_endings": {
+        "Capture": 81343,
+        "Suicide": 521,
+        "TwoPasses": 56
+      }
+    },
+    {
+      "first_iteration": 61,
+      "last_iteration": 120,
+      "iterations": 60,
+      "self_play_games": 122880,
+      "promotions": 31,
+      "mean_plies": 14.516243489583333,
+      "mean_loss": 1.9131864107679575,
+      "mean_policy_loss": 1.8567525196820498,
+      "mean_value_loss": 0.05643389163520188,
+      "candidate_evaluation_black_win_rate": 0.7533333333333333,
+      "candidate_evaluation_white_win_rate": 0.30833333333333335,
+      "self_play_endings": {
+        "Capture": 122318,
+        "Suicide": 541,
+        "TwoPasses": 21
+      }
+    },
+    {
+      "first_iteration": 121,
+      "last_iteration": 180,
+      "iterations": 60,
+      "self_play_games": 122880,
+      "promotions": 15,
+      "mean_plies": 14.2967041015625,
+      "mean_loss": 1.8307074933157612,
+      "mean_policy_loss": 1.8064851842975864,
+      "mean_value_loss": 0.02422230931781376,
+      "candidate_evaluation_black_win_rate": 0.7916666666666666,
+      "candidate_evaluation_white_win_rate": 0.17166666666666666,
+      "self_play_endings": {
+        "Capture": 122292,
+        "Suicide": 569,
+        "TwoPasses": 19
+      }
+    },
+    {
+      "first_iteration": 181,
+      "last_iteration": 220,
+      "iterations": 40,
+      "self_play_games": 81920,
+      "promotions": 12,
+      "mean_plies": 14.432373046875,
+      "mean_loss": 1.8338650091551245,
+      "mean_policy_loss": 1.8050618388922886,
+      "mean_value_loss": 0.028803169386303295,
+      "candidate_evaluation_black_win_rate": 0.8075,
+      "candidate_evaluation_white_win_rate": 0.155,
+      "self_play_endings": {
+        "Capture": 81552,
+        "Suicide": 357,
+        "TwoPasses": 11
+      }
+    },
+    {
+      "first_iteration": 221,
+      "last_iteration": 243,
+      "iterations": 23,
+      "self_play_games": 47104,
+      "promotions": 8,
+      "mean_plies": 14.452445652173912,
+      "mean_loss": 1.8279099727616361,
+      "mean_policy_loss": 1.8015758692813308,
+      "mean_value_loss": 0.026334103695563972,
+      "candidate_evaluation_black_win_rate": 0.7521739130434782,
+      "candidate_evaluation_white_win_rate": 0.20869565217391303,
+      "self_play_endings": {
+        "Capture": 46879,
+        "Suicide": 217,
+        "TwoPasses": 8
+      }
+    }
+  ],
+  "replay_observations": {
+    "size": 131072,
+    "next_index": 97464,
+    "black_actor_positions": 70036,
+    "white_actor_positions": 61036,
+    "black_winner_position_fraction": 0.9937286376953125,
+    "black_actor_positive_value_fraction": 0.9941315650939941,
+    "white_actor_positive_value_fraction": 0.006733730901032686,
+    "initial_game_positions": 9056,
+    "black_wins_from_initial_positions": 9029,
+    "white_wins_from_initial_positions": 27,
+    "black_game_win_rate": 0.997018575668335,
+    "initial_policy_entropy_mean": 0.0,
+    "initial_policy_top1_probability_mean": 1.0,
+    "policy_entropy_mean": 1.6252727508544922,
+    "policy_top1_probability_mean": 0.5427725315093994,
+    "one_hot_policy_fraction": 0.513275146484375,
+    "policy_nonzero_action_count_mean": 15.440567016601562,
+    "pass_policy_probability_mean": 0.0032491683959960938,
+    "mean_stones": 8.350601196289062
+  },
+  "champion_inference": {
+    "initial_value": 0.9894115924835205,
+    "initial_top_action": 52,
+    "initial_top_move_row_col_1based": [
+      6,
+      8
+    ],
+    "initial_top_probability": 0.9999972581863403,
+    "initial_policy_entropy": 4.3547068344196305e-05,
+    "white_value_after_top_move": -0.9928222298622131,
+    "white_value_mean_after_all_legal_first_moves": -0.8864459991455078,
+    "white_value_min_after_all_legal_first_moves": -0.9928222298622131,
+    "white_value_max_after_all_legal_first_moves": -0.4459834396839142
+  },
+  "value_shortcut_comparison": {
+    "color_only_prediction": "Black actor +1, White actor -1, independent of board",
+    "color_only_mse_on_replay": 0.02508544921875,
+    "last_iteration_mean_value_loss": 0.01881751780479135,
+    "interpretation": "A very low value loss is compatible with color-dominated replay. This comparison does not prove that the network ignores board features."
+  },
+  "human_game_tactical_reproduction": {
+    "moves_row_col_1based": [
+      [
+        4,
+        8
+      ],
+      [
+        5,
+        8
+      ],
+      [
+        2,
+        8
+      ],
+      [
+        6,
+        8
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        6,
+        2
+      ],
+      [
+        4,
+        7
+      ],
+      [
+        3,
+        7
+      ],
+      [
+        5,
+        9
+      ],
+      [
+        4,
+        6
+      ]
+    ],
+    "actor": "White",
+    "unsafe_move_row_col_1based": [
+      4,
+      9
+    ],
+    "black_capturing_reply_row_col_1based": [
+      5,
+      7
+    ],
+    "sole_safe_action": 42,
+    "sole_safe_move_row_col_1based": [
+      5,
+      7
+    ],
+    "cpu_analysis_single_seconds": 0.0035284000041428953,
+    "oracle_validation": "All legal root moves and all legal replies; all eight board rotations/reflections."
+  },
+  "limitations": [
+    "Self-play black dominance does not establish true game-theoretic first-player advantage.",
+    "Evaluation compares consecutive candidate/champion models with 20 games; it does not measure absolute playing strength.",
+    "The 0.0035284-second CPU tactical check is a single fixture measurement, not an average over arbitrary game positions."
+  ]
+}

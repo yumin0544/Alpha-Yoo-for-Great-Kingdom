@@ -26,9 +26,21 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--resume", type=Path, help="전체 학습 체크포인트 latest.pt")
     source.add_argument("--initial-model", type=Path, help="새 학습에 사용할 기존 모델 가중치")
+    parser.add_argument("--reconfigure", action="store_true",
+                        help="--resume과 새 --output으로 설정 변경; 진행·optimizer·버퍼 유지")
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="모델·설정·버퍼를 저장하고 대국을 시작하지 않음")
     parser.add_argument("--device", default="cpu", help="cpu 또는 사용 가능한 cuda 장치")
     parser.add_argument("--self-play-backend", choices=("cpu", "cuda"),
                         help="자가 대국 규칙·탐색 장치 (기본 cpu); cuda는 --device cuda 필요")
+    parser.add_argument("--augment-symmetries", action=argparse.BooleanOptionalAction, default=None,
+                        help="학습 위치·정책에 8가지 회전/반사 중 하나를 무작위 적용")
+    parser.add_argument("--self-play-tactical-checks", action=argparse.BooleanOptionalAction,
+                        default=None, help="CUDA 루트에서 즉시 승리·패배와 한 수 포획 위협 확인")
+    parser.add_argument("--self-play-fpu-reduction", type=float,
+                        help="CUDA 미방문 수 가치=신경망 가치-지정값 (미지정은 기존 Q=0)")
+    parser.add_argument("--temperature-moves", type=int,
+                        help="자가 대국 초반 몇 수까지 기존 온도 사용; 이후 --final-temperature")
     parser.add_argument("--threads", type=positive_integer, default=1,
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
     parser.add_argument("--channels", type=positive_integer, help="새 모델 채널 수 (기본 32)")
@@ -46,6 +58,7 @@ def main():
         "learning-rate": "learning_rate", "weight-decay": "weight_decay",
         "promotion-threshold": "promotion_threshold",
         "eval-opening-temperature": "evaluation_opening_temperature",
+        "final-temperature": "final_temperature",
     }
     for flag, field in integer_flags.items():
         parser.add_argument("--" + flag, dest=field, type=positive_integer)
@@ -57,13 +70,21 @@ def main():
     config_names = set(asdict(TrainingConfig()))
     overrides = {name: getattr(args, name) for name in config_names
                  if getattr(args, name) is not None}
-    if args.resume and (overrides or args.channels is not None or args.residual_blocks is not None):
+    if args.reconfigure and not args.resume:
+        parser.error("--reconfigure에는 --resume이 필요합니다.")
+    if args.resume and (args.channels is not None or args.residual_blocks is not None):
+        parser.error("재개 시 모델 구성을 변경할 수 없습니다.")
+    if args.resume and overrides and not args.reconfigure:
         parser.error("재개 시 학습 설정과 모델 구성은 체크포인트에서 복원하므로 변경할 수 없습니다.")
     if args.initial_model and (args.channels is not None or args.residual_blocks is not None):
         parser.error("기존 모델을 읽을 때 채널 수와 잔차 블록 수를 지정할 수 없습니다.")
     latest = args.output / "latest.pt"
     best = args.output / "best.pt"
     metrics = args.output / "metrics.jsonl"
+    if args.reconfigure and (
+            any(path.exists() for path in (latest, best, metrics))
+            or latest.resolve() == args.resume.resolve()):
+        parser.error("설정 변경 시 기존 기록을 보존하도록 새 --output 폴더를 사용하세요.")
     if not args.resume and any(path.exists() for path in (latest, best, metrics)):
         parser.error("출력 폴더에 기존 학습 기록이 있습니다. --resume 또는 새 --output을 사용하세요.")
     if args.resume and latest.exists() and latest.resolve() != args.resume.resolve():
@@ -74,6 +95,8 @@ def main():
     try:
         if args.resume:
             trainer = Trainer.load_checkpoint(args.resume, device=args.device)
+            if args.reconfigure:
+                trainer.reconfigure(**overrides)
         else:
             config = TrainingConfig(**overrides)
             if args.initial_model:
@@ -112,15 +135,18 @@ def main():
     try:
         trainer.save_checkpoint(latest)
         trainer.export_champion(best)
-        trainer.run(args.iterations, checkpoint_path=latest, metrics_path=metrics,
-                    on_iteration=report, collect_metrics=False)
+        if not args.prepare_only:
+            trainer.run(args.iterations, checkpoint_path=latest, metrics_path=metrics,
+                        on_iteration=report, collect_metrics=False)
+        else:
+            print("설정과 학습 상태를 저장했습니다. 추가 학습은 시작하지 않았습니다.")
     except KeyboardInterrupt:
         print(f"\n중단했습니다. 마지막 완료·저장한 반복부터 재개: {latest.resolve()}")
         print("진행 중이던 반복의 대국과 학습은 체크포인트를 읽은 뒤 다시 실행합니다.")
         return 130
     print(f"학습 재개 파일: {latest.resolve()}")
     print(f"기준 모델 파일: {best.resolve()}")
-    print(f"기록 파일: {metrics.resolve()}")
+    print(f"기록 파일{' (첫 반복 완료 시 생성)' if args.prepare_only else ''}: {metrics.resolve()}")
     return 0
 
 

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from types import SimpleNamespace
 
 import my_board_engine as engine
 import torch
 
 from .model import PolicyValueNet
 from .puct import PUCT, PUCTOptions, sample_visits
+from .encoding import move_to_action
+from .tactics import analyze_tactics, select_tactical_move
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,22 @@ def _real(name: str, value: float, *, positive: bool) -> None:
         raise ValueError(f"{name} must be finite and {qualifier}")
 
 
+def _sample_tactical_visits(result, choices, *, temperature, generator):
+    """Keep opening visit sampling within the same tactical set for either model.
+
+    A shallow statistics view leaves the actual search result untouched. If
+    all preferred moves are unvisited, the tactical selector still supplies a
+    legal move instead of sampling known losing visited actions.
+    """
+    move = select_tactical_move(result, choices)
+    moves = [item for item in result.moves if move_to_action(item.move) in choices.preferred_actions]
+    visits = sum(item.visits for item in moves)
+    if visits == 0:
+        return move
+    filtered = SimpleNamespace(best_move=move, simulations=visits, moves=moves)
+    return sample_visits(filtered, temperature=temperature, generator=generator)
+
+
 def _play_game(
     candidate: PolicyValueNet,
     reference: PolicyValueNet,
@@ -54,6 +73,7 @@ def _play_game(
     seed: int,
     opening_moves: int,
     opening_temperature: float,
+    tactical_checks: bool = False,
 ) -> tuple[engine.Cell, engine.EndReason, int]:
     # New searchers and a reset generator make each swapped-color pair use
     # the same randomness. Search itself has no noise or wall-clock budget.
@@ -74,7 +94,11 @@ def _play_game(
     while not game.result.finished():
         result = searchers[game.to_play].search(game)
         temperature = opening_temperature if plies < opening_moves else 0.0
-        move = sample_visits(result, temperature=temperature, generator=generator)
+        if tactical_checks:
+            move = _sample_tactical_visits(result, analyze_tactics(game),
+                                           temperature=temperature, generator=generator)
+        else:
+            move = sample_visits(result, temperature=temperature, generator=generator)
         if not game.play(move).accepted():
             raise RuntimeError("Evaluation PUCT produced a rejected move")
         plies += 1
@@ -95,6 +119,7 @@ def evaluate_models(
     seed: int = 42,
     opening_moves: int = 6,
     opening_temperature: float = 1.0,
+    tactical_checks: bool = False,
 ) -> EvaluationResult:
     """Play equal-budget pairs, with the candidate first black then white.
 
@@ -107,6 +132,10 @@ def evaluate_models(
     Parameters, gradients, model devices, global RNG and thread settings are
     preserved. Every module's train/eval flag is restored, including on error.
     The function runs games sequentially using the default engine rules.
+    With ``tactical_checks=True``, both models take immediate wins and select
+    only one-move safe root actions whenever such alternatives exist. Opening
+    temperature still samples their actual visits; an unvisited tactical action
+    is selected deterministically if none of these actions has visits.
     """
     if not isinstance(candidate, PolicyValueNet) or not isinstance(reference, PolicyValueNet):
         raise TypeError("candidate and reference must be PolicyValueNet models")
@@ -120,6 +149,8 @@ def evaluate_models(
         raise ValueError("seed must be an unsigned 64-bit integer")
     _integer("opening_moves", opening_moves, 0)
     _real("opening_temperature", opening_temperature, positive=False)
+    if type(tactical_checks) is not bool:
+        raise TypeError("tactical_checks must be a bool")
 
     # NeuralAgent restores the top-level flag after each inference. Preserve
     # all flags here as well, because a caller may use mixed module modes.
@@ -135,6 +166,7 @@ def evaluate_models(
                     candidate, reference, color, simulations=simulations,
                     c_puct=c_puct, seed=pair_seed, opening_moves=opening_moves,
                     opening_temperature=opening_temperature,
+                    tactical_checks=tactical_checks,
                 )
                 total_plies += plies
                 endings[reason.name] = endings.get(reason.name, 0) + 1

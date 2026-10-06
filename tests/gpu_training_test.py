@@ -23,6 +23,11 @@ class GpuTrainingValidationTest(unittest.TestCase):
             {"seed": True}, {"temperature": float("nan")},
             {"temperature": float("inf")}, {"temperature": -1},
             {"temperature": True}, {"temperature": "1"}, {"options": object()},
+            {"temperature_moves": -1}, {"temperature_moves": True},
+            {"temperature_moves": 1.5}, {"temperature_moves": "2"},
+            {"final_temperature": -1}, {"final_temperature": float("nan")},
+            {"final_temperature": float("inf")}, {"final_temperature": True},
+            {"final_temperature": "0"},
         )
         for kwargs in invalid:
             arguments = {"games": 1, **kwargs}
@@ -132,6 +137,36 @@ class GpuTrainingTest(unittest.TestCase):
                 self.assertEqual(sample.policy[81].item(), 0.5)
             self.assertEqual(game.samples[1].features[8, 0, 0].item(), 0.5)
 
+    def test_temperature_schedule_restarts_for_each_chunk_and_keeps_visit_targets(self):
+        cases = ((None, 0., [1., 1., 1., 1.]), (0, 0., []),
+                 (1, 0., [1., 1.]), (1, .125, [1., .125, 1., .125]))
+        weights_function = _visit_sampling_weights
+        for limit, final, expected in cases:
+            temperatures = []
+
+            def weights(visits, temperature):
+                temperatures.append(temperature)
+                return weights_function(visits, temperature)
+
+            def choose_pass(tensor, count, *, generator):
+                return torch.full((tensor.shape[0], count), 81, dtype=torch.int64,
+                                  device=tensor.device)
+
+            with self.subTest(limit=limit, final=final), \
+                    patch("kingdom_ai.gpu_training.GpuPUCT", PassSearcher), \
+                    patch("kingdom_ai.gpu_training._visit_sampling_weights", side_effect=weights), \
+                    patch("kingdom_ai.gpu_training.torch.multinomial", side_effect=choose_pass):
+                games = collect_gpu_puct_games(self.make_model(), 5, temperature=1., batch_size=3,
+                                               temperature_moves=limit, final_temperature=final)
+            self.assertEqual(temperatures, expected)
+            self.assertEqual(len(games), 5)
+            for game in games:
+                self.assertEqual(game.reason, engine.EndReason.TwoPasses)
+                self.assertEqual([sample.value for sample in game.samples], [-1., 1.])
+                for sample in game.samples:
+                    self.assertEqual(sample.policy[0].item(), .5)
+                    self.assertEqual(sample.policy[81].item(), .5)
+
     def test_finished_lanes_append_no_samples_and_lane_order_is_preserved(self):
         terminal = engine.State()
         terminal.pass_turn()
@@ -159,6 +194,7 @@ class GpuTrainingTest(unittest.TestCase):
         cpu_rng = torch.get_rng_state().clone()
         cuda_rngs = [state.clone() for state in torch.cuda.get_rng_state_all()]
         kwargs = dict(games=3, batch_size=2, seed=731, temperature=1.0,
+                      temperature_moves=2, final_temperature=0.25,
                       options=GpuPUCTOptions(simulations=4, seed=731))
         first = collect_gpu_puct_games(model, **kwargs)
         second = collect_gpu_puct_games(model, **kwargs)

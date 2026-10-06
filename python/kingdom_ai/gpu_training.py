@@ -18,7 +18,7 @@ from .gpu_rules import (
     GPU_ACTOR, GPU_CAPTURE, GPU_REASON, GPU_SUICIDE, GPU_TWO_PASSES,
     GPU_WINNER, GpuStateBatch,
 )
-from .training import GameData, TrainingSample
+from .training import GameData, TrainingSample, _validate_temperature_schedule
 
 
 _MAX_PLIES = 2 * engine.CELL_COUNT + 2
@@ -37,7 +37,8 @@ def _visit_sampling_weights(visits, temperature):
     return (logs / temperature).exp().masked_fill(~positive, 0.0)
 
 
-def _collect_chunk(searcher, state, temperature, generator):
+def _collect_chunk(searcher, state, temperature, generator, temperature_moves=None,
+                   final_temperature=0.0):
     batch = len(state)
     device = state.device
     features_history = torch.empty(
@@ -65,10 +66,12 @@ def _collect_chunk(searcher, state, temperature, generator):
         result = searcher.search(state)
         # Policy targets are raw visit proportions, independent of move temperature.
         policy_history[step].copy_(result.policy)
-        if temperature == 0:
+        move_temperature = (temperature if temperature_moves is None
+                            or step < temperature_moves else final_temperature)
+        if move_temperature == 0:
             actions = result.actions
         else:
-            weights = _visit_sampling_weights(result.visits, temperature)
+            weights = _visit_sampling_weights(result.visits, move_temperature)
             # Terminal lanes have no visits. A dummy pass lets multinomial run
             # with fixed-size batches; their eventual action remains -1.
             weights[:, -1] += (~alive).to(weights.dtype)
@@ -112,7 +115,8 @@ def _collect_chunk(searcher, state, temperature, generator):
 
 
 def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
-                           batch_size=128, seed=42, device="cuda") -> list[GameData]:
+                           batch_size=128, seed=42, device="cuda",
+                           temperature_moves=None, final_temperature=0.0) -> list[GameData]:
     """Generate ordered complete games with CUDA PUCT and CPU training samples.
 
     ``options.seed`` controls root noise, and ``seed`` controls visit sampling;
@@ -121,6 +125,9 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
     0.25. Each call owns new private generators and preserves global RNG state
     and the source model. Games run in fixed chunks without filling finished
     lanes. Changing the chunk width changes the random stream's lane grouping.
+    ``temperature_moves`` optionally switches to ``final_temperature`` after
+    the given number of plies, independently for every complete game; ``None``
+    keeps the original fixed temperature throughout each game.
     """
     if type(games) is not int or games < 0:
         raise ValueError("games must be a non-negative integer")
@@ -132,6 +139,7 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
         raise TypeError("Temperature must be a real number")
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("Temperature must be finite and non-negative")
+    _validate_temperature_schedule(temperature_moves, final_temperature)
     if options is None:
         options = GpuPUCTOptions(seed=seed)
     if not isinstance(options, GpuPUCTOptions):
@@ -148,5 +156,6 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
     with torch.cuda.device(searcher.device), torch.no_grad():
         for start in range(0, games, batch_size):
             state = GpuStateBatch.initial(min(batch_size, games - start), device=searcher.device)
-            completed.extend(_collect_chunk(searcher, state, temperature, generator))
+            completed.extend(_collect_chunk(searcher, state, temperature, generator,
+                                             temperature_moves, final_temperature))
     return completed

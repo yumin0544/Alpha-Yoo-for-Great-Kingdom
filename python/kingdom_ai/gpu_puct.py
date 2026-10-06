@@ -25,11 +25,20 @@ from .gpu_runtime import CudaModule
 
 @dataclass(frozen=True)
 class GpuPUCTOptions:
+    """Opt-in root safety and value-based first-play urgency preserve defaults.
+
+    ``tactical_checks`` prioritizes immediate wins and avoids an opponent's
+    immediate winning reply when a safe candidate exists. ``fpu_reduction``
+    initializes unvisited edges from the node's player-perspective value minus
+    that amount; ``None`` retains the original zero initialization.
+    """
     simulations: int = 32
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     seed: int = 42
+    tactical_checks: bool = False
+    fpu_reduction: float | None = None
 
     def __post_init__(self):
         if type(self.simulations) is not int or not 1 <= self.simulations <= 2**31 - 2:
@@ -44,6 +53,14 @@ class GpuPUCTOptions:
             raise ValueError("dirichlet_epsilon must be in [0, 1]")
         if type(self.seed) is not int or not 0 <= self.seed <= 2**64 - 1:
             raise ValueError("seed must be an unsigned 64-bit integer")
+        if type(self.tactical_checks) is not bool:
+            raise TypeError("tactical_checks must be a bool")
+        if self.fpu_reduction is not None and (
+                isinstance(self.fpu_reduction, bool)
+                or not isinstance(self.fpu_reduction, Real)
+                or not math.isfinite(self.fpu_reduction)
+                or self.fpu_reduction < 0):
+            raise ValueError("fpu_reduction must be None or a finite non-negative real")
 
 
 @dataclass(frozen=True)
@@ -62,6 +79,85 @@ class GpuSearchResult:
 _SEARCH_CUDA_SOURCE = r'''
 __device__ long long gpu_vertex(int game, int node, int capacity) {
     return (long long)game * capacity + node;
+}
+
+__device__ bool gpu_root_has_winning_reply(const int* next, int root_actor) {
+    // Only a last-liberty capture or a second pass can win in one move. Avoid
+    // replaying every opponent placement, then verify the identified reply with
+    // the same transition routine used by search and self-play.
+    int reply[GPU_STATE_WIDTH];
+    if (next[GPU_PASSES] == 1) {
+        for (int i = 0; i < GPU_STATE_WIDTH; ++i) reply[i] = next[i];
+        if (gpu_play(reply, GPU_CELL_COUNT) && reply[GPU_REASON] != GPU_NONE &&
+            reply[GPU_WINNER] == next[GPU_ACTOR]) return true;
+    }
+    const int stock_index = next[GPU_ACTOR] == 1 ? GPU_BLACK_STOCK : GPU_WHITE_STOCK;
+    if (next[stock_index] < 1) return false;
+    bool examined[GPU_CELL_COUNT];
+    for (int i = 0; i < GPU_CELL_COUNT; ++i) examined[i] = false;
+    int group[GPU_CELL_COUNT];
+    int neighbours[4];
+    for (int point = 0; point < GPU_CELL_COUNT; ++point) {
+        if (next[point] != root_actor || examined[point]) continue;
+        const int length = gpu_collect_group(next, point, group);
+        int liberty = -1;
+        bool several = false;
+        for (int i = 0; i < length; ++i) {
+            examined[group[i]] = true;
+            const int count = gpu_neighbours(group[i], neighbours);
+            for (int j = 0; j < count; ++j) {
+                const int adjacent = neighbours[j];
+                if (next[adjacent] != 0) continue;
+                if (liberty < 0) liberty = adjacent;
+                else if (liberty != adjacent) several = true;
+            }
+        }
+        if (several || liberty < 0 || !gpu_legal(next, liberty)) continue;
+        for (int i = 0; i < GPU_STATE_WIDTH; ++i) reply[i] = next[i];
+        if (gpu_play(reply, liberty) && reply[GPU_REASON] == GPU_CAPTURE &&
+            reply[GPU_WINNER] == next[GPU_ACTOR]) return true;
+    }
+    return false;
+}
+
+// Check actual transitions and the opponent's winning replies, including
+// capture-before-suicide and pass scoring.
+// Each CUDA thread owns one candidate; the input state and encoded features stay
+// untouched. Search masks may narrow candidates without changing rule legality.
+extern "C" __global__ void gpu_search_root_tactics(
+    const int* input, const bool* masks, int* outcomes, int batch) {
+    long long item = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (item >= (long long)batch * GPU_ACTION_SIZE) return;
+    const int game = item / GPU_ACTION_SIZE;
+    const int action = item % GPU_ACTION_SIZE;
+    outcomes[item] = 0;
+    if (!masks[item]) return;
+    const int* root = input + (long long)game * GPU_STATE_WIDTH;
+    int next[GPU_STATE_WIDTH];
+    for (int i = 0; i < GPU_STATE_WIDTH; ++i) next[i] = root[i];
+    if (!gpu_play(next, action)) return;
+    if (next[GPU_REASON] != GPU_NONE)
+        outcomes[item] = next[GPU_WINNER] == root[GPU_ACTOR] ? 1 : -1;
+    else if (gpu_root_has_winning_reply(next, root[GPU_ACTOR]))
+        outcomes[item] = -1;
+}
+
+extern "C" __global__ void gpu_search_root_filter(
+    const int* outcomes, bool* masks, int batch) {
+    const int game = blockIdx.x * blockDim.x + threadIdx.x;
+    if (game >= batch) return;
+    const long long base = (long long)game * GPU_ACTION_SIZE;
+    bool winning = false;
+    bool safe = false;
+    for (int action = 0; action < GPU_ACTION_SIZE; ++action) {
+        if (!masks[base + action]) continue;
+        winning |= outcomes[base + action] > 0;
+        safe |= outcomes[base + action] >= 0;
+    }
+    for (int action = 0; action < GPU_ACTION_SIZE; ++action) {
+        if (winning) masks[base + action] &= outcomes[base + action] > 0;
+        else if (safe) masks[base + action] &= outcomes[base + action] >= 0;
+    }
 }
 
 extern "C" __global__ void gpu_search_initialize(
@@ -85,6 +181,7 @@ extern "C" __global__ void gpu_search_initialize(
 
 extern "C" __global__ void gpu_search_select(
     int* states, const double* prior, const int* visits, const double* value_sum,
+    const float* node_values,
     int* children, const int* node_visits, const bool* expanded,
     const bool* legal, int* node_count, int* leaf, int* path_nodes,
     int* path_actions, int* path_length, bool* needs_evaluation,
@@ -117,7 +214,9 @@ extern "C" __global__ void gpu_search_select(
         for (int action = 0; action < GPU_ACTION_SIZE; ++action) {
             if (!legal[base + action]) continue;
             const int n = visits[base + action];
-            const double q = n == 0 ? 0.0 : value_sum[base + action] / n;
+            const double q = n == 0
+                ? (options[2] != 0.0 ? node_values[vertex] - options[3] : 0.0)
+                : value_sum[base + action] / n;
             const double exploration = prior[base + action] * scale / (1.0 + n);
             const double score = c_puct >= 1.0 ? q / c_puct + exploration
                                               : q + c_puct * exploration;
@@ -160,6 +259,7 @@ extern "C" __global__ void gpu_search_select(
 
 extern "C" __global__ void gpu_search_expand_backup(
     const int* states, double* prior, int* visits, double* value_sum,
+    float* node_values,
     const int* children, int* node_visits, bool* expanded, bool* legal,
     const int* leaf, const int* path_nodes, const int* path_actions,
     const int* path_length, const bool* needs_evaluation,
@@ -175,6 +275,7 @@ extern "C" __global__ void gpu_search_expand_backup(
     long long base = vertex * GPU_ACTION_SIZE;
     long long row = (long long)game * GPU_ACTION_SIZE;
     if (needs_evaluation[game]) {
+        node_values[vertex] = leaf_values[game];
         double largest = 0.0;
         double total = 0.0;
         double noise_total = 0.0;
@@ -347,6 +448,7 @@ class GpuPUCT:
         value_sum = zeros(prior.shape, torch.float64)
         children = torch.full(prior.shape, -1, dtype=torch.int32, device=device)
         node_visits = zeros((batch, capacity), torch.int32)
+        node_values = zeros((batch, capacity), torch.float32)
         expanded = zeros((batch, capacity), torch.bool)
         legal = zeros(prior.shape, torch.bool)
         node_count = zeros((batch,), torch.int32)
@@ -360,7 +462,9 @@ class GpuPUCT:
         probabilities = zeros((batch, ACTION_SIZE), torch.float32)
         leaf_values = zeros((batch,), torch.float32)
         noise = zeros((batch, ACTION_SIZE), torch.float32)
-        options = torch.tensor([self.options.c_puct, self.options.dirichlet_epsilon],
+        options = torch.tensor([self.options.c_puct, self.options.dirichlet_epsilon,
+                                self.options.fpu_reduction is not None,
+                                self.options.fpu_reduction or 0.0],
                                dtype=torch.float64, device=device)
         simulation_count = zeros((batch,), torch.int32)
         evaluation_count = zeros((batch,), torch.int32)
@@ -368,6 +472,11 @@ class GpuPUCT:
         self._launch("gpu_search_initialize", batch, [
             state.states, states, node_count, leaf, path_length, needs_evaluation,
             features, masks, leaf_values, batch, capacity])
+        if self.options.tactical_checks:
+            outcomes = zeros((batch, ACTION_SIZE), torch.int32)
+            self._launch("gpu_search_root_tactics", batch * ACTION_SIZE, [
+                state.states, masks, outcomes, batch])
+            self._launch("gpu_search_root_filter", batch, [outcomes, masks, batch])
 
         def evaluate():
             active = needs_evaluation.nonzero(as_tuple=False).flatten()
@@ -392,7 +501,7 @@ class GpuPUCT:
             probabilities.index_copy_(0, active, weights.masked_fill(~active_masks, 0.0))
             leaf_values.index_copy_(0, active, torch.where(bad, torch.zeros_like(values), values))
 
-        expand_args = [states, prior, visits, value_sum, children, node_visits,
+        expand_args = [states, prior, visits, value_sum, node_values, children, node_visits,
                        expanded, legal, leaf, path_nodes, path_actions, path_length,
                        needs_evaluation, masks, probabilities, leaf_values, noise,
                        options, simulation_count, evaluation_count, errors, batch, capacity]
@@ -409,7 +518,7 @@ class GpuPUCT:
         self._launch("gpu_search_expand_backup", batch, expand_args + [0])
         for _ in range(self.options.simulations):
             self._launch("gpu_search_select", batch, [
-                states, prior, visits, value_sum, children, node_visits, expanded,
+                states, prior, visits, value_sum, node_values, children, node_visits, expanded,
                 legal, node_count, leaf, path_nodes, path_actions, path_length,
                 needs_evaluation, features, masks, leaf_values, options, errors, batch, capacity])
             evaluate()

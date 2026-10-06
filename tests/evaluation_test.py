@@ -9,7 +9,9 @@ from unittest.mock import patch
 import my_board_engine as engine
 import torch
 
-from kingdom_ai.evaluation import EvaluationResult, evaluate_models
+from kingdom_ai.evaluation import EvaluationResult, evaluate_models, _sample_tactical_visits
+from kingdom_ai.encoding import action_to_move, move_to_action
+from kingdom_ai.tactics import TacticalChoices
 from kingdom_ai.model import PolicyValueNet
 from kingdom_ai.puct import sample_visits
 
@@ -65,7 +67,7 @@ class EvaluationTest(unittest.TestCase):
                 parameter.grad = torch.full_like(parameter, 0.25)
         rng = torch.random.get_rng_state().clone()
         threads = torch.get_num_threads()
-        options = dict(games=2, simulations=2, seed=418, opening_moves=3)
+        options = dict(games=2, simulations=2, seed=418, opening_moves=3, tactical_checks=True)
         first = evaluate_models(*models, **options)
         second = evaluate_models(*models, **options)
         self.assertEqual(first, second)
@@ -136,6 +138,81 @@ class EvaluationTest(unittest.TestCase):
         self.assertGreater(sample.call_count, 0)
         self.assertTrue(all(call.kwargs["temperature"] == 0 for call in sample.call_args_list))
 
+    def test_identical_models_keep_paired_half_wins_with_tactical_checks(self):
+        result = evaluate_models(self.candidate, self.reference, games=2, simulations=2,
+                                 seed=317, opening_moves=3, tactical_checks=True)
+        self.assertEqual(result.win_rate, .5)
+        self.assertEqual(result.wins, 1)
+        self.assertEqual(sum(result.endings.values()), 2)
+
+    def test_tactical_openings_apply_to_both_colors_and_preserve_pair_seeds(self):
+        guarded = []
+        samples = []
+
+        class PassSearcher:
+            def __init__(searcher, model, options):
+                searcher.options = options
+
+            def search(searcher, state):
+                return SimpleNamespace(
+                    best_move=engine.Move.place(0, 0), simulations=13,
+                    moves=[SimpleNamespace(move=engine.Move.place(0, 0), visits=12, value=1.),
+                           SimpleNamespace(move=engine.Move.pass_turn(), visits=1, value=0.)],
+                )
+
+        def only_pass(state):
+            guarded.append(state.to_play)
+            return TacticalChoices(frozenset((0, 81)), frozenset(), frozenset((81,)))
+
+        def record_sample(result, *, temperature, generator):
+            self.assertEqual([move_to_action(item.move) for item in result.moves], [81])
+            samples.append((temperature, generator.initial_seed()))
+            return sample_visits(result, temperature=temperature, generator=generator)
+
+        with patch("kingdom_ai.evaluation.PUCT", PassSearcher), \
+                patch("kingdom_ai.evaluation.analyze_tactics", side_effect=only_pass), \
+                patch("kingdom_ai.evaluation.sample_visits", side_effect=record_sample):
+            result = evaluate_models(self.candidate, self.reference, games=4, simulations=13,
+                                     seed=2**64 - 1, opening_moves=1, opening_temperature=.5,
+                                     tactical_checks=True)
+        self.assertEqual(result.wins, 2)
+        self.assertEqual(guarded, [engine.Cell.Black, engine.Cell.White] * 4)
+        self.assertEqual(samples, [(.5, 2**64 - 1), (0., 2**64 - 1)] * 2
+                         + [(.5, 0), (0., 0)] * 2)
+
+    def test_unvisited_winning_actions_override_unsafe_visits_without_mutating_search(self):
+        unsafe = SimpleNamespace(move=action_to_move(7), visits=31, value=.75)
+        winning = SimpleNamespace(move=action_to_move(12), visits=0, value=0.)
+        result = SimpleNamespace(best_move=unsafe.move, simulations=31, moves=[unsafe, winning])
+        choices = TacticalChoices(frozenset((7, 12)), frozenset((12,)), frozenset((12,)))
+        generator = torch.Generator().manual_seed(927)
+        before = generator.get_state().clone()
+        move = _sample_tactical_visits(result, choices, temperature=1., generator=generator)
+        self.assertEqual(move_to_action(move), 12)
+        self.assertEqual(move_to_action(result.best_move), 7)
+        self.assertEqual(result.simulations, 31)
+        self.assertEqual([item.visits for item in result.moves], [31, 0])
+        torch.testing.assert_close(generator.get_state(), before, rtol=0, atol=0)
+
+    def test_tactical_evaluation_restores_modes_when_guard_raises(self):
+        self.candidate.train()
+        self.candidate.policy_head.eval()
+        self.reference.eval()
+        self.reference.value_head.train()
+        modes = {module: module.training for model in (self.candidate, self.reference)
+                 for module in model.modules()}
+
+        def fail(*args):
+            self.candidate.eval()
+            self.reference.train()
+            raise LookupError("tactical evaluation failed")
+
+        with patch("kingdom_ai.evaluation.analyze_tactics", side_effect=fail), \
+                self.assertRaisesRegex(LookupError, "tactical evaluation failed"):
+            evaluate_models(self.candidate, self.reference, games=2, simulations=1,
+                            tactical_checks=True)
+        self.assertEqual({module: module.training for module in modes}, modes)
+
     def test_modes_restore_when_search_raises(self):
         self.candidate.train()
         self.candidate.policy_head.eval()
@@ -158,6 +235,7 @@ class EvaluationTest(unittest.TestCase):
             "seed": (-1, 2 ** 64, True, 0.0),
             "opening_moves": (-1, True, 1.0),
             "opening_temperature": (-1, float("nan"), float("inf"), True, "1"),
+            "tactical_checks": (None, 0, 1, "true"),
         }
         with patch("kingdom_ai.evaluation.PUCT") as searcher:
             for name, values in invalid.items():

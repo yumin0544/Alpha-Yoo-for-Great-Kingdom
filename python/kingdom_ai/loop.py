@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 import json
 import math
 import os
@@ -15,6 +15,7 @@ from time import perf_counter
 import torch
 
 from .checkpoint import save_model
+from .augmentation import augment_batch
 from .encoding import ACTION_SIZE, BOARD_SIZE, FEATURE_NAMES, FORMAT_VERSION
 from .evaluation import evaluate_models
 from .gpu_puct import GpuPUCTOptions
@@ -46,6 +47,11 @@ class TrainingConfig:
     seed: int = 42
     self_play_backend: str = "cpu"
     self_play_batch_size: int = 128
+    augment_symmetries: bool = False
+    temperature_moves: int | None = None
+    final_temperature: float = 0.0
+    self_play_tactical_checks: bool = False
+    self_play_fpu_reduction: float | None = None
 
     def __post_init__(self):
         positive_ints = (
@@ -61,6 +67,20 @@ class TrainingConfig:
             raise ValueError("self_play_backend must be 'cpu' or 'cuda'")
         if self.self_play_backend == "cuda" and self.simulations > 2 ** 31 - 2:
             raise ValueError("CUDA simulations must not exceed 2147483646")
+        if type(self.augment_symmetries) is not bool or type(self.self_play_tactical_checks) is not bool:
+            raise ValueError("augment_symmetries and self_play_tactical_checks must be bool")
+        if self.temperature_moves is not None and (
+                type(self.temperature_moves) is not int or self.temperature_moves < 0):
+            raise ValueError("temperature_moves must be None or a non-negative integer")
+        if self.self_play_fpu_reduction is not None and (
+                isinstance(self.self_play_fpu_reduction, bool)
+                or not isinstance(self.self_play_fpu_reduction, (int, float))
+                or not math.isfinite(self.self_play_fpu_reduction)
+                or self.self_play_fpu_reduction < 0):
+            raise ValueError("self_play_fpu_reduction must be None or a finite non-negative real")
+        if self.self_play_backend != "cuda" and (
+                self.self_play_tactical_checks or self.self_play_fpu_reduction is not None):
+            raise ValueError("Training tactical checks and FPU require CUDA self-play")
         if self.evaluation_games < 2 or self.evaluation_games % 2:
             raise ValueError("evaluation_games must be even and at least two")
         if type(self.evaluation_opening_moves) is not int or self.evaluation_opening_moves < 0:
@@ -71,6 +91,7 @@ class TrainingConfig:
             "c_puct", "dirichlet_alpha", "dirichlet_epsilon", "temperature",
             "learning_rate", "weight_decay", "evaluation_opening_temperature",
             "promotion_threshold",
+            "final_temperature",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -78,7 +99,7 @@ class TrainingConfig:
         for name in ("c_puct", "dirichlet_alpha", "learning_rate"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        for name in ("temperature", "weight_decay", "evaluation_opening_temperature"):
+        for name in ("temperature", "final_temperature", "weight_decay", "evaluation_opening_temperature"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be non-negative")
         if not 0 <= self.dirichlet_epsilon <= 1:
@@ -87,8 +108,12 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 2
+_CHECKPOINT_VERSION = 3
 _GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
+_STRENGTH_CONFIG_KEYS = {
+    "augment_symmetries", "temperature_moves", "final_temperature",
+    "self_play_tactical_checks", "self_play_fpu_reduction",
+}
 _SCHEMA = {
     "format_version": FORMAT_VERSION, "board_size": BOARD_SIZE,
     "action_size": ACTION_SIZE, "feature_names": list(FEATURE_NAMES),
@@ -257,8 +282,37 @@ class Trainer:
     def _next_seed(self):
         return int(torch.randint(2 ** 63 - 1, (1,), generator=self.generator, device="cpu").item())
 
+    def reconfigure(self, **overrides):
+        """Change learning/search settings at a saved boundary without resetting state.
+
+        Historical counter invariants require the iteration game/update budgets
+        and replay capacity to remain fixed. Architecture, RNG, replay contents,
+        optimizer moments and progress are preserved. Call save_checkpoint() on
+        a NEW path to persist the changed settings before continuing.
+        """
+        if not self._at_boundary:
+            raise RuntimeError("Cannot reconfigure an incomplete iteration")
+        immutable = {"games_per_iteration", "train_steps_per_iteration", "replay_capacity", "seed"}
+        if immutable.intersection(overrides):
+            raise ValueError("Reconfiguration cannot change games, training steps, replay capacity or seed")
+        try:
+            config = replace(self.config, **overrides)
+        except TypeError as error:
+            raise ValueError("Unknown training configuration field") from error
+        if config.self_play_backend == "cuda" and self.device.type != "cuda":
+            raise ValueError("CUDA self-play requires a CUDA Trainer device")
+        # Validation above completes before changing any owned state.
+        self.config = config
+        for group in self.optimizer.param_groups:
+            group["lr"] = config.learning_rate
+            group["weight_decay"] = config.weight_decay
+
     def _collect_games(self):
         config = self.config
+        schedule_options = ({} if config.temperature_moves is None else {
+            "temperature_moves": config.temperature_moves,
+            "final_temperature": config.final_temperature,
+        })
         if config.self_play_backend == "cuda":
             # Each chunk owns temporary GPU RNG streams seeded from the saved
             # CPU generator. No unsaved searcher survives an iteration boundary.
@@ -268,11 +322,14 @@ class Trainer:
                     simulations=config.simulations, c_puct=config.c_puct, seed=seed,
                     dirichlet_alpha=config.dirichlet_alpha,
                     dirichlet_epsilon=config.dirichlet_epsilon,
+                    tactical_checks=config.self_play_tactical_checks,
+                    fpu_reduction=config.self_play_fpu_reduction,
                 )
                 count = min(config.self_play_batch_size, config.games_per_iteration - offset)
                 yield from collect_gpu_puct_games(
                     self.champion, count, options=options, temperature=config.temperature,
                     seed=seed, batch_size=config.self_play_batch_size, device=self.device,
+                    **schedule_options,
                 )
         else:
             for _ in range(config.games_per_iteration):
@@ -283,7 +340,8 @@ class Trainer:
                     dirichlet_epsilon=config.dirichlet_epsilon,
                 )
                 yield collect_puct_game(self.champion, options=options,
-                                        temperature=config.temperature, seed=seed)
+                                        temperature=config.temperature, seed=seed,
+                                        **schedule_options)
 
     def _synchronize(self):
         if self.device.type == "cuda":
@@ -311,6 +369,8 @@ class Trainer:
         for _ in range(config.train_steps_per_iteration):
             batch = self.replay.sample(config.batch_size, generator=self.generator,
                                        device=self.device)
+            if config.augment_symmetries:
+                batch = augment_batch(batch, generator=self.generator)
             losses = train_step(self.model, self.optimizer, batch)
             for key in loss_totals:
                 loss_totals[key] += losses[key]
@@ -318,11 +378,13 @@ class Trainer:
         self._synchronize()
         training_seconds = perf_counter() - training_started
         evaluation_started = perf_counter()
+        evaluation_options = ({"tactical_checks": True} if config.self_play_tactical_checks else {})
         evaluation = evaluate_models(
             self.model, self.champion, games=config.evaluation_games,
             simulations=config.evaluation_simulations, c_puct=config.c_puct,
             seed=self._next_seed(), opening_moves=config.evaluation_opening_moves,
             opening_temperature=config.evaluation_opening_temperature,
+            **evaluation_options,
         )
         promoted = evaluation.win_rate >= config.promotion_threshold
         if promoted:
@@ -345,6 +407,10 @@ class Trainer:
             "elapsed_seconds": elapsed_seconds,
             "self_play_backend": config.self_play_backend,
             "self_play_batch_size": config.self_play_batch_size,
+            "augment_symmetries": config.augment_symmetries,
+            "self_play_simulations": config.simulations,
+            "self_play_tactical_checks": config.self_play_tactical_checks,
+            "self_play_fpu_reduction": config.self_play_fpu_reduction,
             "self_play_games_per_second": config.games_per_iteration / self_play_seconds,
             "iteration_games_per_second": config.games_per_iteration / elapsed_seconds,
         }
@@ -377,12 +443,14 @@ class Trainer:
         if not isinstance(payload, dict) or set(payload) != _CHECKPOINT_KEYS:
             raise ValueError("Unexpected training checkpoint fields")
         version = payload["checkpoint_version"]
-        if type(version) is not int or version not in (1, _CHECKPOINT_VERSION):
+        if type(version) is not int or version not in (1, 2, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
         if not _same_primitive(payload["schema"], _SCHEMA):
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
         config_keys = {field.name for field in fields(TrainingConfig)}
+        if version < 3:
+            config_keys -= _STRENGTH_CONFIG_KEYS
         if version == 1:
             config_keys -= _GPU_CONFIG_KEYS
         if not isinstance(raw_config, dict) or set(raw_config) != config_keys:

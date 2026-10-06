@@ -132,10 +132,12 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         source = self.path / "current.pt"
         trainer.save_checkpoint(source)
         payload = torch.load(source, map_location="cpu", weights_only=True)
-        self.assertEqual(payload["checkpoint_version"], 2)
+        self.assertEqual(payload["checkpoint_version"], 3)
         payload["checkpoint_version"] = 1
         payload["config"].pop("self_play_backend")
         payload["config"].pop("self_play_batch_size")
+        for field in loop._STRENGTH_CONFIG_KEYS:
+            payload["config"].pop(field)
         legacy = self.path / "legacy.pt"
         torch.save(payload, legacy)
 
@@ -164,7 +166,7 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         damaged["checkpoint_version"] = 1
         variants.append(damaged)  # New settings must not be silently accepted as v1.
         damaged = copy.deepcopy(original)
-        damaged["checkpoint_version"] = 3
+        damaged["checkpoint_version"] = 4
         variants.append(damaged)
         for index, damaged in enumerate(variants):
             torch.save(damaged, target)
@@ -209,6 +211,12 @@ class GpuTrainerIntegrationTest(EqualityMixin, unittest.TestCase):
 
     def trainer(self):
         return Trainer(config=self.config, model=small_model(), device="cuda")
+
+    def test_strength_options_actual_gpu_training_and_exact_resume(self):
+        self.config = replace(self.config, augment_symmetries=True,
+                              temperature_moves=2, final_temperature=0.25,
+                              self_play_tactical_checks=True, self_play_fpu_reduction=0.0)
+        self.test_actual_gpu_selfplay_training_evaluation_and_exact_resume()
 
     def test_actual_gpu_selfplay_training_evaluation_and_exact_resume(self):
         collect = loop.collect_gpu_puct_games
