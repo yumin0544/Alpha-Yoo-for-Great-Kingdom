@@ -35,6 +35,7 @@ add_library(mcts
     mcts/src/Node.cpp
     mcts/src/MCTS.cpp
     mcts/src/PUCT.cpp
+    mcts/src/BatchedPUCT.cpp
 )
 target_link_libraries(mcts PUBLIC engine)
 target_include_directories(mcts PUBLIC
@@ -49,7 +50,7 @@ if(BUILD_PYTHON_BINDINGS)
     find_package(Python 3.10 REQUIRED COMPONENTS Interpreter Development.Module)
     set(PYBIND11_FINDPYTHON ON)
     find_package(pybind11 3.0 CONFIG REQUIRED)
-    pybind11_add_module(my_board_engine bindings/module.cpp)
+    pybind11_add_module(my_board_engine bindings/module.cpp bindings/batched_puct.cpp)
     target_link_libraries(my_board_engine PRIVATE mcts)
     set_target_properties(my_board_engine PROPERTIES CXX_EXTENSIONS OFF)
     enable_project_warnings(my_board_engine)
@@ -90,6 +91,10 @@ if(BUILD_TESTING)
     target_link_libraries(mcts_test PRIVATE mcts)
     enable_project_warnings(mcts_test)
     add_test(NAME mcts_test COMMAND mcts_test)
+    add_executable(batched_puct_test tests/batched_puct_test.cpp)
+    target_link_libraries(batched_puct_test PRIVATE mcts)
+    enable_project_warnings(batched_puct_test)
+    add_test(NAME batched_puct_test COMMAND batched_puct_test)
     add_test(NAME console_test COMMAND "${CMAKE_COMMAND}"
         "-DGAME_EXECUTABLE=$<TARGET_FILE:great_kingdom>"
         "-DBINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}"
@@ -133,7 +138,7 @@ if(BUILD_TESTING)
                 "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/puct_test.py"
             )
             set_tests_properties(puct_test PROPERTIES TIMEOUT 120)
-            foreach(learning_test IN ITEMS replay_test evaluation_test reinforcement_test batching_test gpu_rules_test gpu_puct_test gpu_training_test gpu_trainer_test augmentation_test temperature_schedule_test tactics_test strength_config_test metrics_test)
+            foreach(learning_test IN ITEMS replay_test evaluation_test reinforcement_test batching_test gpu_rules_test gpu_puct_test gpu_training_test gpu_trainer_test augmentation_test temperature_schedule_test tactics_test strength_config_test metrics_test batched_binding_test encoded_batching_test batched_evaluation_test batched_runtime_test)
                 add_test(NAME ${learning_test} COMMAND "${CMAKE_COMMAND}" -E env
                     "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>${neural_path_separator}${CMAKE_CURRENT_SOURCE_DIR}/python"
                     "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/${learning_test}.py"

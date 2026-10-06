@@ -108,7 +108,7 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 4
+_CHECKPOINT_VERSION = 5
 _GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
 _STRENGTH_CONFIG_KEYS = {
     "augment_symmetries", "temperature_moves", "final_temperature",
@@ -126,7 +126,10 @@ _CHECKPOINT_KEYS = {
     "optimizer", "replay", "progress", "generator_state", "rng", "runtime",
     "last_metrics",
 }
-_RUNTIME_KEYS = {"evaluation_workers"}
+_RUNTIME_KEYS_V4 = {"evaluation_workers"}
+_RUNTIME_KEYS = _RUNTIME_KEYS_V4 | {
+    "evaluation_backend", "evaluation_leaf_batch_size", "evaluation_reuse_tree",
+}
 _PROGRESS_KEYS = {"iteration", "self_play_games", "training_steps", "champion_version"}
 
 
@@ -253,19 +256,30 @@ class Trainer:
     interrupted iteration must be discarded by loading the last checkpoint.
     """
 
-    def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1):
+    def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1,
+                 evaluation_backend="legacy", evaluation_leaf_batch_size=8,
+                 evaluation_reuse_tree=True):
         if not isinstance(config, TrainingConfig):
             raise TypeError("config must be a TrainingConfig")
         if model is not None and not isinstance(model, PolicyValueNet):
             raise TypeError("model must be a PolicyValueNet")
         if type(evaluation_workers) is not int or evaluation_workers < 1:
             raise ValueError("evaluation_workers must be a positive integer")
+        if type(evaluation_backend) is not str or evaluation_backend not in ("legacy", "batched_cpp"):
+            raise ValueError("evaluation_backend must be 'legacy' or 'batched_cpp'")
+        if type(evaluation_leaf_batch_size) is not int or evaluation_leaf_batch_size < 1:
+            raise ValueError("evaluation_leaf_batch_size must be a positive integer")
+        if type(evaluation_reuse_tree) is not bool:
+            raise ValueError("evaluation_reuse_tree must be a bool")
         self.config = config
         self.device = torch.device(device)
         # Parallel batching can change floating-point scheduling, so preserve
         # this operational setting in checkpoints even though it is not part of
         # TrainingConfig and can be explicitly overridden when loading.
         self.evaluation_workers = evaluation_workers
+        self.evaluation_backend = evaluation_backend
+        self.evaluation_leaf_batch_size = evaluation_leaf_batch_size
+        self.evaluation_reuse_tree = evaluation_reuse_tree
         if config.self_play_backend == "cuda":
             if self.device.type != "cuda":
                 raise ValueError("CUDA self-play requires a CUDA Trainer device (device='cuda')")
@@ -414,6 +428,12 @@ class Trainer:
         training_seconds = perf_counter() - training_started
         evaluation_started = perf_counter()
         evaluation_options = ({"tactical_checks": True} if config.self_play_tactical_checks else {})
+        evaluation_diagnostics = {}
+        if self.evaluation_backend == "batched_cpp":
+            evaluation_options.update(
+                backend=self.evaluation_backend, leaf_batch_size=self.evaluation_leaf_batch_size,
+                reuse_tree=self.evaluation_reuse_tree, diagnostics=evaluation_diagnostics,
+            )
         evaluation = evaluate_models(
             self.model, self.champion, games=config.evaluation_games,
             simulations=config.evaluation_simulations, c_puct=config.c_puct,
@@ -452,6 +472,10 @@ class Trainer:
             "training_seconds": training_seconds, "evaluation_seconds": evaluation_seconds,
             "elapsed_seconds": elapsed_seconds,
             "evaluation_workers": self.evaluation_workers,
+            "evaluation_backend": self.evaluation_backend,
+            "evaluation_leaf_batch_size": self.evaluation_leaf_batch_size,
+            "evaluation_reuse_tree": self.evaluation_reuse_tree,
+            "evaluation_diagnostics": evaluation_diagnostics,
             "self_play_backend": config.self_play_backend,
             "self_play_batch_size": config.self_play_batch_size,
             "games_per_iteration": config.games_per_iteration,
@@ -495,21 +519,31 @@ class Trainer:
             "rng": {"python": random.getstate(), "torch_cpu": torch.get_rng_state().clone(),
                     "torch_cuda": ([state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
                                    if torch.cuda.is_available() else [])},
-            "runtime": {"evaluation_workers": self.evaluation_workers},
+            "runtime": {name: getattr(self, name) for name in _RUNTIME_KEYS},
             "last_metrics": deepcopy(self._last_metrics),
         }
         _atomic_write(path, lambda temporary: torch.save(payload, temporary))
 
     @classmethod
-    def load_checkpoint(cls, path, device="cpu", evaluation_workers=None):
+    def load_checkpoint(cls, path, device="cpu", evaluation_workers=None,
+                        evaluation_backend=None, evaluation_leaf_batch_size=None,
+                        evaluation_reuse_tree=None):
         if (evaluation_workers is not None
                 and (type(evaluation_workers) is not int or evaluation_workers < 1)):
             raise ValueError("evaluation_workers must be None or a positive integer")
+        if evaluation_backend is not None and (
+                type(evaluation_backend) is not str or evaluation_backend not in ("legacy", "batched_cpp")):
+            raise ValueError("evaluation_backend must be None, 'legacy' or 'batched_cpp'")
+        if evaluation_leaf_batch_size is not None and (
+                type(evaluation_leaf_batch_size) is not int or evaluation_leaf_batch_size < 1):
+            raise ValueError("evaluation_leaf_batch_size must be None or a positive integer")
+        if evaluation_reuse_tree is not None and type(evaluation_reuse_tree) is not bool:
+            raise ValueError("evaluation_reuse_tree must be None or a bool")
         payload = torch.load(Path(path), map_location="cpu", weights_only=True)
         if not isinstance(payload, dict):
             raise ValueError("Unexpected training checkpoint fields")
         version = payload.get("checkpoint_version")
-        if type(version) is not int or version not in (1, 2, 3, _CHECKPOINT_VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
         expected_keys = (_CHECKPOINT_KEYS if version >= 4
                          else _CHECKPOINT_KEYS - {"runtime"})
@@ -565,18 +599,32 @@ class Trainer:
         cuda_states = payload["rng"]["torch_cuda"]
         if cuda_states and torch.cuda.is_available() and len(cuda_states) != torch.cuda.device_count():
             raise ValueError("CUDA device count differs from the saved RNG configuration")
-        saved_evaluation_workers = 1
+        saved_runtime = {
+            "evaluation_workers": 1, "evaluation_backend": "legacy",
+            "evaluation_leaf_batch_size": 8, "evaluation_reuse_tree": True,
+        }
         if version >= 4:
             runtime = payload["runtime"]
-            if (not isinstance(runtime, dict) or set(runtime) != _RUNTIME_KEYS
+            expected_runtime = _RUNTIME_KEYS_V4 if version == 4 else _RUNTIME_KEYS
+            if (not isinstance(runtime, dict) or set(runtime) != expected_runtime
                     or type(runtime["evaluation_workers"]) is not int
                     or runtime["evaluation_workers"] < 1):
                 raise ValueError("Invalid checkpoint runtime settings")
-            saved_evaluation_workers = runtime["evaluation_workers"]
-        trainer = cls(config, model=model, device=device,
-                      evaluation_workers=(saved_evaluation_workers
-                                          if evaluation_workers is None
-                                          else evaluation_workers))
+            if version >= 5 and (
+                    type(runtime["evaluation_backend"]) is not str
+                    or runtime["evaluation_backend"] not in ("legacy", "batched_cpp")
+                    or type(runtime["evaluation_leaf_batch_size"]) is not int
+                    or runtime["evaluation_leaf_batch_size"] < 1
+                    or type(runtime["evaluation_reuse_tree"]) is not bool):
+                raise ValueError("Invalid checkpoint runtime settings")
+            saved_runtime.update(runtime)
+        requested_runtime = {
+            "evaluation_workers": evaluation_workers, "evaluation_backend": evaluation_backend,
+            "evaluation_leaf_batch_size": evaluation_leaf_batch_size,
+            "evaluation_reuse_tree": evaluation_reuse_tree,
+        }
+        saved_runtime.update({name: value for name, value in requested_runtime.items() if value is not None})
+        trainer = cls(config, model=model, device=device, **saved_runtime)
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay

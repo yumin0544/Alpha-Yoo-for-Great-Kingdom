@@ -132,7 +132,7 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         source = self.path / "current.pt"
         trainer.save_checkpoint(source)
         payload = torch.load(source, map_location="cpu", weights_only=True)
-        self.assertEqual(payload["checkpoint_version"], 4)
+        self.assertEqual(payload["checkpoint_version"], 5)
         payload["checkpoint_version"] = 1
         payload.pop("runtime")
         payload["config"].pop("self_play_backend")
@@ -167,7 +167,7 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         damaged["checkpoint_version"] = 1
         variants.append(damaged)  # New settings must not be silently accepted as v1.
         damaged = copy.deepcopy(original)
-        damaged["checkpoint_version"] = 5
+        damaged["checkpoint_version"] = 6
         variants.append(damaged)
         for index, damaged in enumerate(variants):
             torch.save(damaged, target)

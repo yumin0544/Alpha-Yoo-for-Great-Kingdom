@@ -15,6 +15,8 @@
 namespace py = pybind11;
 using namespace kingdom;
 
+void bind_batched_puct(py::module_& module);
+
 namespace {
 
 // State is copied while the GIL is held. Python may continue using the original
@@ -292,4 +294,5 @@ PYBIND11_MODULE(my_board_engine, module) {
         .def_property_readonly("options", &PythonPUCT::options)
         .def("search", &PythonPUCT::search, py::arg("state"), py::arg("evaluator"),
              "C++ PUCT using evaluator(state) -> (82 policy weights, current-player value).");
+    bind_batched_puct(module);
 }

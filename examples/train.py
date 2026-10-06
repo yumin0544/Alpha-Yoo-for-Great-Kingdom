@@ -45,6 +45,12 @@ def main():
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
     parser.add_argument("--evaluation-workers", type=positive_integer,
                         help="평가 병렬 worker 수; 새 학습 기본 1, 재개 시 저장값 복원")
+    parser.add_argument("--evaluation-backend", choices=("legacy", "batched_cpp"),
+                        help="평가 탐색 경로; batched_cpp는 C++ leaf 배치·입력 생성·트리 재사용")
+    parser.add_argument("--evaluation-leaf-batch-size", type=positive_integer,
+                        help="한 탐색에서 동시에 준비할 leaf 수 (새 학습 기본 8)")
+    parser.add_argument("--evaluation-reuse-tree", action=argparse.BooleanOptionalAction,
+                        default=None, help="batched_cpp 평가에서 실제 착수 후 하위 트리 재사용")
     parser.add_argument("--channels", type=positive_integer, help="새 모델 채널 수 (기본 32)")
     parser.add_argument("--residual-blocks", type=int, help="새 모델 잔차 블록 수 (기본 2)")
     integer_flags = {
@@ -99,6 +105,9 @@ def main():
             trainer = Trainer.load_checkpoint(
                 args.resume, device=args.device,
                 evaluation_workers=args.evaluation_workers,
+                evaluation_backend=args.evaluation_backend,
+                evaluation_leaf_batch_size=args.evaluation_leaf_batch_size,
+                evaluation_reuse_tree=args.evaluation_reuse_tree,
             )
             if args.reconfigure:
                 trainer.reconfigure(**overrides)
@@ -117,12 +126,18 @@ def main():
                 config, model=model, device=args.device,
                 evaluation_workers=(1 if args.evaluation_workers is None
                                     else args.evaluation_workers),
+                evaluation_backend=args.evaluation_backend or "legacy",
+                evaluation_leaf_batch_size=(8 if args.evaluation_leaf_batch_size is None
+                                            else args.evaluation_leaf_batch_size),
+                evaluation_reuse_tree=(True if args.evaluation_reuse_tree is None
+                                       else args.evaluation_reuse_tree),
             )
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(str(error))
     print(
         f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판, "
-        f"평가 worker {trainer.evaluation_workers}개"
+        f"평가 {trainer.evaluation_backend}, worker {trainer.evaluation_workers}개, "
+        f"leaf 배치 {trainer.evaluation_leaf_batch_size}, 트리 재사용 {trainer.evaluation_reuse_tree}"
     )
     print(json.dumps(asdict(trainer.config), ensure_ascii=False))
     print("평가 승률은 현재 기준 모델에 대한 결과이며, 절대 기력은 별도 검증해야 합니다.")

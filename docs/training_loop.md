@@ -12,6 +12,10 @@
 기본은 순차 실행이고 `--evaluation-workers`가 2 이상이면 독립 대국들의 모델
 추론을 `--device`에서 batch로 묶는다. Bitboard와 C++/LibTorch 직접 추론은
 이후 작업이다.
+`--evaluation-backend batched_cpp`는 C++에서 여러 leaf와 입력을 준비하고,
+모델별 GPU 배치 추론 및 실제 착수 후 하위 트리 재사용을 연결한다.
+기본값과 이전 체크포인트는 `legacy`다. 자세한 내용은
+[C++ leaf 배치 평가](batched_evaluation.md)를 참고한다.
 반복 학습 프로그램의 구현과 수십만 판 학습으로 얻은 기력 검증은 구분한다.
 
 ## 실행 순서
@@ -64,7 +68,7 @@ GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국�
 ```
 
 재개 시 학습 설정과 모델 구성은 체크포인트에서 복원한다. `--iterations`,
-`--output`, `--device`, `--threads`, `--evaluation-workers`만 변경할 수 있으며,
+`--output`, `--device`, `--threads`와 `--evaluation-*` 실행 설정을 변경할 수 있으며,
 탐색 횟수·학습률·버퍼
 용량 등 학습 설정을 함께 지정하면 오류를 표시한다. `--initial-model`은
 기존 `save_model` 파일의 가중치로 **새 학습 실행**을 시작하는 옵션이다.
@@ -87,7 +91,8 @@ CUDA용 PyTorch와 호환 드라이버가 설치된 환경에서 자가 대국 �
 커널 준비가 포함될 수 있다.
 
 중단 후에는 CUDA 장치를 다시 지정하고, 자가 대국 경로와 배치 크기는
-체크포인트에서 복원한다. 평가 worker도 버전 4 체크포인트에서 복원된다.
+체크포인트에서 복원한다. 평가 worker는 버전 4 이상에서, backend·leaf 배치·트리
+재사용 여부는 버전 5에서 복원된다. 이전 형식은 `legacy` 평가로 복원한다.
 
 ```powershell
 .\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
@@ -204,6 +209,9 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--eval-games` | 20 | 한 반복의 평가 대국 수, 2 이상 짝수 |
 | `--eval-simulations` | 128 | 평가 대국의 매 수 PUCT 탐색 횟수 |
 | `--evaluation-workers` | 새 학습 1 / 재개 시 저장값 | 동시 평가 대국 수; 모델별 추론 요청을 batch로 묶음 |
+| `--evaluation-backend` | 새 학습 `legacy` / 재개 시 저장값 | `batched_cpp`는 C++ leaf 배치·입력 생성 경로 |
+| `--evaluation-leaf-batch-size` | 새 학습 8 / 재개 시 저장값 | `batched_cpp` 한 탐색의 미평가 leaf 상한 |
+| `--evaluation-reuse-tree` | 새 학습 켜짐 / 재개 시 저장값 | `batched_cpp` 모델별 하위 트리 재사용; `--no-`로 해제 |
 | `--eval-opening-moves` / `--eval-opening-temperature` | 6 / 1.0 | 평가 초반 방문 수 착수 샘플링 |
 | `--promotion-threshold` | 0.55 | 후보 승률이 이 값 이상이면 승격 |
 | `--temperature` | 1.0 | 자가 대국의 방문 수 착수 샘플링 온도 |
@@ -267,7 +275,7 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 처음 6수는 온도 1로 방문 수에서 착수를 뽑고, 이후에는 가장 많이 방문한 수를
 선택한다. 동일 모델끼리의 같은 시드 흑백 쌍은 정확히 1승 1패가 된다.
 
-기본 `evaluation_workers=1`은 기존 순차 경로를 그대로 사용한다. 2 이상이면
+기본 `legacy`의 `evaluation_workers=1`은 기존 순차 경로를 그대로 사용한다. 2 이상이면
 대국마다 독립 C++ PUCT를 두고 후보·기준 모델별 추론 요청을 두 개의 batch
 서비스로 묶는다. 동적 batch 구성의 부동소수점 순서가 승격 결과에 영향을 줄
 가능성이 있으므로 worker 수를 버전 4 체크포인트에 저장한다. 재개 시 지정하지

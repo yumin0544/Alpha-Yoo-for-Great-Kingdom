@@ -11,6 +11,7 @@ import my_board_engine as engine
 import torch
 
 from .batching import BatchedEvaluator
+from .encoded_batching import EncodedBatchedEvaluator
 from .model import PolicyValueNet
 from .puct import PUCT, PUCTOptions, sample_visits
 from .encoding import move_to_action
@@ -163,6 +164,61 @@ def _play_batched_game(
     return game.result.winner, game.result.reason, plies
 
 
+def _play_encoded_game(
+    candidate_evaluator: EncodedBatchedEvaluator,
+    reference_evaluator: EncodedBatchedEvaluator,
+    candidate_color: engine.Cell,
+    *, simulations: int, c_puct: float, seed: int, opening_moves: int,
+    opening_temperature: float, tactical_checks: bool,
+    leaf_batch_size: int, reuse_tree: bool,
+):
+    """Keep one reusable tree per model, never mix opposing model values."""
+    reference_color = (engine.Cell.White if candidate_color == engine.Cell.Black
+                       else engine.Cell.Black)
+    options = PUCTOptions(simulations=simulations, c_puct=c_puct, seed=seed,
+                          time_limit_ms=0, dirichlet_epsilon=0)
+    searchers = {
+        candidate_color: engine.BatchedPUCT(options, leaf_batch_size=leaf_batch_size,
+                                           reuse_tree=reuse_tree),
+        reference_color: engine.BatchedPUCT(options, leaf_batch_size=leaf_batch_size,
+                                           reuse_tree=reuse_tree),
+    }
+    evaluators = {candidate_color: candidate_evaluator, reference_color: reference_evaluator}
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    game = engine.State()
+    plies = 0
+    stats = {}
+    while not game.result.finished():
+        actor = game.to_play
+        result = searchers[actor].search(game, evaluators[actor])
+        # Search-local counters must be collected now, before this model's next
+        # search overwrites them. Lifecycle advance/reuse counters are cumulative.
+        for key, value in searchers[actor].stats.items():
+            if key not in ("advance_calls", "reuse_hits"):
+                stats[key] = (max(stats.get(key, 0), value) if key.startswith("max_")
+                              else stats.get(key, 0) + value)
+        temperature = opening_temperature if plies < opening_moves else 0.0
+        move = (_sample_tactical_visits(result, analyze_tactics(game),
+                                       temperature=temperature, generator=generator)
+                if tactical_checks else sample_visits(result, temperature=temperature,
+                                                       generator=generator))
+        if not game.play(move).accepted():
+            raise RuntimeError("Evaluation BatchedPUCT produced a rejected move")
+        # Advance BOTH model-owned trees after every real move, including the
+        # opponent's. An unexplored branch safely drops that model's cache.
+        for searcher in searchers.values():
+            searcher.advance(move)
+        plies += 1
+        if plies > 2 * engine.CELL_COUNT + 2:
+            raise RuntimeError("Evaluation game exceeded its finite move bound")
+    if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
+        raise RuntimeError("A completed evaluation game must have a winner")
+    for searcher in searchers.values():
+        for key in ("advance_calls", "reuse_hits"):
+            stats[key] = stats.get(key, 0) + searcher.stats.get(key, 0)
+    return game.result.winner, game.result.reason, plies, stats
+
+
 def evaluate_models(
     candidate: PolicyValueNet,
     reference: PolicyValueNet,
@@ -175,6 +231,11 @@ def evaluate_models(
     opening_temperature: float = 1.0,
     tactical_checks: bool = False,
     workers: int = 1,
+    backend: str = "legacy",
+    leaf_batch_size: int = 8,
+    reuse_tree: bool = True,
+    inference_wait_ms: float = 0.0,
+    diagnostics: dict | None = None,
 ) -> EvaluationResult:
     """Play equal-budget pairs, with the candidate first black then white.
 
@@ -189,6 +250,13 @@ def evaluate_models(
     The default ``workers=1`` path retains the original sequential execution.
     Larger values run independent games in parallel and batch each model's
     inference requests; the effective worker count is capped at ``games``.
+    ``backend='batched_cpp'`` collects several C++ leaves before each callback,
+    receives C++-encoded arrays, and optionally reuses each model's own tree.
+    Its visit distribution can differ from legacy sequential PUCT. The leaf
+    batching limit is independent of the number of parallel game workers.
+    ``inference_wait_ms`` controls optional partial-batch coalescing only in
+    this new backend. A supplied ``diagnostics`` dict receives inference and
+    cumulative search statistics without changing ``EvaluationResult``.
     All games use the default engine rules.
     With ``tactical_checks=True``, both models take immediate wins and select
     only one-move safe root actions whenever such alternatives exist. Opening
@@ -210,6 +278,18 @@ def evaluate_models(
     if type(tactical_checks) is not bool:
         raise TypeError("tactical_checks must be a bool")
     _integer("workers", workers, 1)
+    if not isinstance(backend, str):
+        raise TypeError("backend must be a string")
+    if backend not in ("legacy", "batched_cpp"):
+        raise ValueError("backend must be 'legacy' or 'batched_cpp'")
+    _integer("leaf_batch_size", leaf_batch_size, 1)
+    if type(reuse_tree) is not bool:
+        raise TypeError("reuse_tree must be a bool")
+    _real("inference_wait_ms", inference_wait_ms, positive=False)
+    if diagnostics is not None and not isinstance(diagnostics, dict):
+        raise TypeError("diagnostics must be a dict or None")
+    if backend == "batched_cpp" and not hasattr(engine, "BatchedPUCT"):
+        raise RuntimeError("batched_cpp evaluation requires rebuilt BatchedPUCT bindings")
 
     # NeuralAgent restores the top-level flag after each inference. Preserve
     # all flags here as well, because a caller may use mixed module modes.
@@ -223,7 +303,48 @@ def evaluate_models(
             for pair in range(games // 2)
             for color in (engine.Cell.Black, engine.Cell.White)
         ]
-        if workers == 1:
+        if backend == "batched_cpp":
+            worker_count = min(workers, games)
+            candidate_device = next(candidate.parameters()).device
+            reference_device = next(reference.parameters()).device
+            row_cap = worker_count * leaf_batch_size
+            with EncodedBatchedEvaluator(
+                candidate, device=candidate_device, max_batch_size=row_cap,
+                max_wait_ms=inference_wait_ms,
+            ) as candidate_evaluator, EncodedBatchedEvaluator(
+                reference, device=reference_device, max_batch_size=row_cap,
+                max_wait_ms=inference_wait_ms,
+            ) as reference_evaluator:
+                def play_encoded(job):
+                    color, pair_seed = job
+                    return _play_encoded_game(
+                        candidate_evaluator, reference_evaluator, color,
+                        simulations=simulations, c_puct=c_puct, seed=pair_seed,
+                        opening_moves=opening_moves, opening_temperature=opening_temperature,
+                        tactical_checks=tactical_checks, leaf_batch_size=leaf_batch_size,
+                        reuse_tree=reuse_tree,
+                    )
+
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    detailed = list(pool.map(play_encoded, jobs))
+                results = [item[:3] for item in detailed]
+                if diagnostics is not None:
+                    search_stats = {}
+                    for item in detailed:
+                        for key, value in item[3].items():
+                            search_stats[key] = (
+                                max(search_stats.get(key, 0), value) if key.startswith("max_")
+                                else search_stats.get(key, 0) + value
+                            )
+                    diagnostics.update({
+                        "backend": backend, "workers": worker_count,
+                        "leaf_batch_size": leaf_batch_size, "reuse_tree": reuse_tree,
+                        "inference_wait_ms": inference_wait_ms,
+                        "candidate_inference": candidate_evaluator.stats,
+                        "reference_inference": reference_evaluator.stats,
+                        "search": search_stats,
+                    })
+        elif workers == 1:
             results = [
                 _play_game(
                     candidate, reference, color, simulations=simulations,
@@ -258,6 +379,15 @@ def evaluate_models(
                     # executor.map preserves paired input order even though games
                     # finish out of order, keeping aggregation deterministic.
                     results = list(pool.map(play, jobs))
+                if diagnostics is not None:
+                    diagnostics.update({
+                        "backend": backend, "workers": worker_count,
+                        "candidate_inference": candidate_evaluator.stats,
+                        "reference_inference": reference_evaluator.stats,
+                    })
+
+        if diagnostics is not None and backend == "legacy" and workers == 1:
+            diagnostics.update({"backend": backend, "workers": 1})
 
         for (color, _), (winner, reason, plies) in zip(jobs, results):
             total_plies += plies
