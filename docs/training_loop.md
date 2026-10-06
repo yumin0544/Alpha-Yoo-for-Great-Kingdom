@@ -8,9 +8,10 @@
 기본 `cpu` 경로는 기존 C++ 규칙·PUCT로 대국을 순차 생성한다. `cuda` 경로는
 여러 독립 대국의 규칙·입력 인코딩·PUCT 트리·신경망 추론을 GPU에서 함께
 실행하고 같은 학습 자료 버퍼에 연결한다. 미니배치 가중치 갱신은 `--device`의
-장치에서 수행한다. 평가 대국은 두 경로 모두 기존 C++ 규칙·PUCT를 순차적으로
-실행하고 모델 추론에 `--device`를 사용한다. Bitboard와 C++/LibTorch 직접
-추론은 이후 작업이다.
+장치에서 수행한다. 평가 대국은 두 경로 모두 기존 C++ 규칙·PUCT를 사용하며,
+기본은 순차 실행이고 `--evaluation-workers`가 2 이상이면 독립 대국들의 모델
+추론을 `--device`에서 batch로 묶는다. Bitboard와 C++/LibTorch 직접 추론은
+이후 작업이다.
 반복 학습 프로그램의 구현과 수십만 판 학습으로 얻은 기력 검증은 구분한다.
 
 ## 실행 순서
@@ -63,7 +64,8 @@ GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국�
 ```
 
 재개 시 학습 설정과 모델 구성은 체크포인트에서 복원한다. `--iterations`,
-`--output`, `--device`, `--threads`만 변경할 수 있으며, 탐색 횟수·학습률·버퍼
+`--output`, `--device`, `--threads`, `--evaluation-workers`만 변경할 수 있으며,
+탐색 횟수·학습률·버퍼
 용량 등 학습 설정을 함께 지정하면 오류를 표시한다. `--initial-model`은
 기존 `save_model` 파일의 가중치로 **새 학습 실행**을 시작하는 옵션이다.
 `--resume`과 함께 사용할 수 없고 optimizer, 버퍼와 진행 횟수는 이어받지 않는다.
@@ -75,7 +77,7 @@ CUDA용 PyTorch와 호환 드라이버가 설치된 환경에서 자가 대국 �
 버퍼 학습·평가·저장까지 한 번 실행하는 설정 예시다.
 
 ```powershell
-.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --evaluation-workers 12 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
 ```
 
 자가 대국 루트 잡음 비율 0.25와 착수 온도 1.0은 기본적으로 켜져 있다.
@@ -85,7 +87,7 @@ CUDA용 PyTorch와 호환 드라이버가 설치된 환경에서 자가 대국 �
 커널 준비가 포함될 수 있다.
 
 중단 후에는 CUDA 장치를 다시 지정하고, 자가 대국 경로와 배치 크기는
-체크포인트에서 복원한다.
+체크포인트에서 복원한다. 평가 worker도 버전 4 체크포인트에서 복원된다.
 
 ```powershell
 .\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
@@ -201,6 +203,7 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--weight-decay` | 0.0001 | Adam 가중치 감쇠 |
 | `--eval-games` | 20 | 한 반복의 평가 대국 수, 2 이상 짝수 |
 | `--eval-simulations` | 128 | 평가 대국의 매 수 PUCT 탐색 횟수 |
+| `--evaluation-workers` | 새 학습 1 / 재개 시 저장값 | 동시 평가 대국 수; 모델별 추론 요청을 batch로 묶음 |
 | `--eval-opening-moves` / `--eval-opening-temperature` | 6 / 1.0 | 평가 초반 방문 수 착수 샘플링 |
 | `--promotion-threshold` | 0.55 | 후보 승률이 이 값 이상이면 승격 |
 | `--temperature` | 1.0 | 자가 대국의 방문 수 착수 샘플링 온도 |
@@ -264,6 +267,18 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 처음 6수는 온도 1로 방문 수에서 착수를 뽑고, 이후에는 가장 많이 방문한 수를
 선택한다. 동일 모델끼리의 같은 시드 흑백 쌍은 정확히 1승 1패가 된다.
 
+기본 `evaluation_workers=1`은 기존 순차 경로를 그대로 사용한다. 2 이상이면
+대국마다 독립 C++ PUCT를 두고 후보·기준 모델별 추론 요청을 두 개의 batch
+서비스로 묶는다. 동적 batch 구성의 부동소수점 순서가 승격 결과에 영향을 줄
+가능성이 있으므로 worker 수를 버전 4 체크포인트에 저장한다. 재개 시 지정하지
+않으면 저장값을 복원하고, 명시하면 그 실행부터 덮어쓴 뒤 다음 저장에 보존한다.
+버전 1~3 파일에는 이 값이 없어 worker 1로 복원한다. 처음 병렬화할 때만
+`--evaluation-workers 12`처럼 지정하면 된다. 지정값이 평가 판수보다 크면 실제
+worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 짧은 CUDA
+비교는 일치했다. 다만 병렬 경로는 같은 worker 수에서도 thread 실행 순서에
+따라 추론 batch 구성이 달라질 수 있어 CUDA의 비트 단위 재현성을 보장하지
+않는다. 장치·PyTorch 버전 변경도 부동소수점 결과에 영향을 줄 수 있다.
+
 기본 20판이면 후보가 11승 이상 했을 때 55% 기준을 통과한다. 이 값은 현재
 기준 모델과의 관측 승률이며, 절대 기력이나 모든 상대에 대한 승률은 아니다.
 적은 평가 판수는 편차가 크므로 장기 학습의 기준은 추가 검증으로 정한다.
@@ -278,6 +293,92 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 포함하지 않는다.
 손실 감소와 후보 승격을 함께 살피고, 평가 예산과 상대가 바뀌었는지도 확인한다.
 
+### 성능·버퍼 지표 분석
+
+새 지표 스키마 2는 자료 생성 시간을 GPU 계산·자료 구성 구간과 CPU replay
+저장 구간으로 나누고 다음 값을 추가한다.
+
+- `self_play_positions_per_second`: 판 길이 변화에 덜 왜곡되는 위치 처리량
+- `self_play_compute_seconds`, `replay_store_seconds`: 자가 대국과 버퍼 적재 시간
+- 평균·95백분위·최대 수순, 자가 대국 흑백 승수와 종료 사유
+- replay 용량·회전율·이번 자료 보존 비율
+- 반복당 학습 추출 수와 생성 위치/버퍼 위치 대비 추출 비율
+- 이번 실행의 평가 worker 수
+
+`Trainer.run()`이 파일을 저장할 때 반환값·`metrics.jsonl`·callback에는
+`initial_checkpoint_seconds`, `checkpoint_seconds`, `checkpoint_bytes`와
+`checkpoint_written`, `elapsed_with_checkpoint_seconds`도 기록한다.
+`checkpoint_written`은 실제 파일을 쓴 실행과 파일 없이 API만 실행한 경우를
+구분한다. 저장 시간은 저장이 끝난 뒤에만
+알 수 있으므로 같은 체크포인트 내부의 `last_metrics`에는 포함하지 않는다.
+`elapsed_seconds`는 이전과 같이 자가 대국·학습·평가 계산 시간이다.
+`elapsed_with_checkpoint_seconds`도 JSONL append와 callback의 `best.pt` export
+시간은 포함하지 않으므로 전체 체감 wall-clock과 동일하다고 간주하지 않는다.
+
+기존 및 새 지표 파일은 체크포인트를 읽지 않는 분석기로 함께 요약한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\analyze_training.py runs\gpu-r1-tuned\metrics.jsonl --recent 10 --target-iterations 300
+```
+
+출력은 전체·최근 위치/초와 판/초, 평균 수순, 단계별 시간 비중, 후보의 흑백별
+평가 승률, 승격률, replay가 최근 몇 사이클을 담는지와 남은 기록 시간 추정을
+보여준다. 구형 행에는 체크포인트·replay 세부 시간이 없으므로 이를 0으로
+간주하지 않고 기록 범위를 따로 표시한다. `--json`으로 기계 판독 결과를 얻는다.
+
+CLI의 일반 학습 실행은 `Trainer.run()`의 시작 경계 저장만 사용한다. 이 저장이
+완료된 뒤 대국을 시작하고, `best.pt`는 첫 반복 완료 후 callback에서 내보낸다.
+따라서 초기 저장 실패 때 `best.pt`만 남지 않으며, 이전처럼 같은 대형
+`latest.pt`를 실행 직전에 두 번 연속 저장하지 않는다. `--prepare-only`도
+`latest.pt`를 먼저 저장한 뒤 `best.pt`를 내보낸다.
+
+### 사이클당 판수와 replay 용량 조정 기준
+
+`gpu-r1-tuned`의 최근 10사이클은 2,048판에서 평균 14.49수, 약 29,670개
+위치를 만들었다. 현재 131,072 위치 버퍼는 최근 생성량 기준 약 4.41사이클을
+담는다. 초기 장기 실행처럼 평균 수순이 25.6수라면 약 2.50사이클이다. 따라서
+버퍼는 고정 GB보다 **최근 몇 사이클을 보존하는지**로 판단한다.
+
+새 전술·128회 탐색 설정은 대국 길이를 바꿀 수 있으므로 첫 3~5사이클 동안은
+2,048판·131,072 위치를 유지하고 실제 생성 위치를 먼저 측정한다. 이후 목표
+3~5사이클에 맞춰 대략 `판수 × 평균 수순 × 목표 사이클`로 용량을 계산한다.
+위치당 tensor payload는 3,655바이트이며 버퍼를 키우면 RAM뿐 아니라 매 경계의
+체크포인트 크기와 저장 시간도 같은 비율로 늘어난다.
+
+현재 512개 × 128회 갱신은 사이클당 65,536개 위치를 복원추출한다. 가득 찬
+131,072 버퍼의 슬롯당 평균 0.5회이며, 균등 복원추출에서 한 사이클에 적어도
+한 번 뽑힐 것으로 기대되는 고유 슬롯은 약 39%다. 버퍼만 두 배로 키우면 이
+비율이 낮아지므로 학습 추출량도 함께 비교해야 한다.
+
+평가 비용을 분산하려고 사이클당 판수를 4,096로 늘리는 실험은 가능하지만,
+기준 모델 갱신이 절반 빈도로 늦어지고 같은 비율을 유지하려면 학습 step과
+버퍼도 함께 조정해야 한다. 현재 체크포인트는 판수·step·용량 변경을 재개 중에
+허용하지 않는다. 병렬 평가는 축소 A/B에서 12 worker가 순차보다 2.72배
+빨랐으므로 먼저 2,048판 설정을 유지한 채 실제 128회 탐색 사이클의 새 처리량과
+기력 지표를 측정한다. 그 뒤 4,096판을 독립 A/B 실행으로 비교한다. 단순히
+1,024판으로 줄이면 고정 평가 비중이 커질 수 있어 속도 최적화의 기본값으로
+권하지 않는다.
+
+실제 새 설정의 첫 사이클은 64,952개 위치·평균 31.715수였고, 131,072 버퍼는
+이 생성량 기준 약 2.02사이클을 담았다. 모든 새 위치를 보존했으며, 현재는
+이 용량과 2,048판을 유지해 기존 편향 자료가 교체되는 동안 추이를 확인한다.
+3~5사이클을 담으려면 이번 생성량으로 약 195,000~325,000 위치가 필요하지만,
+한 번의 측정만으로 용량을 키우지 않는다. 용량 변경은 별도 실행에서 학습
+추출량·자료 다양성·후보 평가와 함께 비교한다.
+
+측정 실행은 완료 244사이클까지 별도 저장했고, 준비한 `gpu-strength-v2` 원본은
+243사이클 상태 그대로다. 측정한 상태를 이어가려면 다음 명령을 사용한다.
+worker 12는 체크포인트에서 복원된다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-strength-speed-pilot-2026-10-06\latest.pt --iterations 3 --output runs\gpu-strength-speed-pilot-2026-10-06
+.\.venv\Scripts\python.exe examples\analyze_training.py runs\gpu-strength-speed-pilot-2026-10-06\metrics.jsonl --recent 4
+```
+
+첫 사이클의 체크포인트 포함 기록 시간은 314.40초였다. 평가 206.40초가 계산
+시간의 66.3%이므로 사이클당 판수를 조정할 때 평가 비용과 champion 갱신
+간격을 함께 판단한다. 상세 측정 범위는 [성능 기록](performance.md)에 있다.
+
 ## Python API
 
 ```python
@@ -287,7 +388,7 @@ config = TrainingConfig(
     games_per_iteration=2, simulations=4, evaluation_games=2,
     evaluation_simulations=4, train_steps_per_iteration=2, batch_size=16,
 )
-trainer = Trainer(config, device="cpu")
+trainer = Trainer(config, device="cpu", evaluation_workers=4)
 trainer.run(1, checkpoint_path="runs/api/latest.pt", metrics_path="runs/api/metrics.jsonl")
 trainer.export_champion("runs/api/best.pt")
 
@@ -305,7 +406,8 @@ CLI는 항상 `collect_metrics=False`로 실행한다.
 하위 구성은 `ReplayBuffer`와 `evaluate_models`로 따로 사용할 수 있다.
 버퍼의 `sample(batch_size, generator=..., device=...)`에는 호출자가 관리하는
 CPU `torch.Generator`가 필요하다. `evaluate_models(candidate, reference, ...)`는
-후보 관점의 승패와 흑백별 승수를 반환한다.
+후보 관점의 승패와 흑백별 승수를 반환하며 `workers`로 병렬 대국·batch 추론을
+선택한다. 기본값 1은 이전 순차 실행과 같다.
 
 ## 검증
 
@@ -365,3 +467,19 @@ GPU 통합 검증은 기존 CPU 엔진과 착수 기록·입력·정책·최종 
   버퍼 10,000개와 프로세스 종료 후 체크포인트 재개를 확인했다. 검증 파일은
   `runs/gpu-trainer-validation-2026-10-05/latest.pt`, 기준 모델은 같은 폴더의
   `best.pt`다. 단계별 측정과 범위는 [성능 기록](performance.md)에 있다.
+
+### 병목 개선 검증: 2026-10-06
+
+- 기존 C++ 규칙·바인딩·GPU PUCT·자료 생성·학습·재개와 새 지표 분석을 포함한
+  CTest 22개 묶음이 모두 통과했다(240.84초).
+- 4,096개를 넘는 벌크 적재, ring 경계와 용량 초과 입력의 FIFO 순서,
+  잘못된 마지막 표본을 포함한 입력의 사전 검증 원자성을 검사했다.
+- CPU 병렬 평가를 사용하는 연속 학습과 저장·재개 결과가 정확히 일치했다.
+  짧은 CUDA 평가는 순차·병렬 비교와 병렬 3회 반복 결과가 일치했고, 추론
+  실패 시 worker 종료와 모델 mode 복원도 확인했다.
+- 체크포인트 버전 1~3을 읽고 worker 1로 복원하며, 버전 4의 worker 저장·복원과
+  명시적 변경, 잘못된 runtime 설정 거부를 검사했다.
+- 일반 CLI와 prepare-only 각각의 최초 저장에 OSError·KeyboardInterrupt를
+  주입한 네 경우 모두 `best.pt`만 남지 않았고, 초기 중단 안내가 올바르다.
+- 프로젝트 가상환경을 오프라인으로 갱신하고 설치된 패키지의 새 API와 지표
+  분석기를 실행했다. `engine/` 파일은 변경하지 않았다.

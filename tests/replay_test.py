@@ -92,6 +92,32 @@ class ReplayTests(unittest.TestCase):
             sequential.extend([position])
         self.assertStateEqual(bulk.state_dict(), sequential.state_dict())
 
+    def test_bulk_validation_crosses_internal_chunks_and_remains_atomic(self):
+        entries = [sample(index) for index in range(5)] * 820
+        buffer = ReplayBuffer(3)
+        buffer.extend(entries)
+        saved = buffer.state_dict()
+        self.assertEqual(saved["next_index"], len(entries) % 3)
+        self.assertEqual(saved["policy"].argmax(dim=1).tolist(), [3, 4, 2])
+
+        before = buffer.state_dict()
+        malformed = replace(sample(1), value=0.0)
+        with self.assertRaises(ValueError):
+            buffer.extend([sample(0)] * 4096 + [malformed])
+        self.assertStateEqual(before, buffer.state_dict())
+
+    def test_large_wrapped_overcapacity_append_matches_incremental_fifo(self):
+        capacity = 4099
+        bulk, incremental = ReplayBuffer(capacity), ReplayBuffer(capacity)
+        initial = [sample(index) for index in range(73)]
+        bulk.extend(initial)
+        incremental.extend(initial)
+        incoming = [sample(index + 7) for index in range(capacity + 19)]
+        bulk.extend(incoming)
+        for start in range(0, len(incoming), 97):
+            incremental.extend(incoming[start:start + 97])
+        self.assertStateEqual(bulk.state_dict(), incremental.state_dict())
+
     def test_empty_extend_and_empty_serialization_do_not_expose_storage(self):
         buffer = ReplayBuffer(9)
         buffer.extend([])

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import my_board_engine as engine
 import torch
 
+from kingdom_ai.batching import BatchedEvaluator
 from kingdom_ai.evaluation import EvaluationResult, evaluate_models, _sample_tactical_visits
 from kingdom_ai.encoding import action_to_move, move_to_action
 from kingdom_ai.tactics import TacticalChoices
@@ -80,6 +81,62 @@ class EvaluationTest(unittest.TestCase):
                 torch.testing.assert_close(parameter.grad, torch.full_like(parameter, 0.25),
                                            rtol=0, atol=0)
         self.assertEqual({module: module.training for module in modes}, modes)
+
+    def test_parallel_evaluation_matches_sequential_pairs_and_is_repeatable(self):
+        options = dict(games=4, simulations=4, seed=271, opening_moves=3,
+                       opening_temperature=1.0, tactical_checks=True)
+        expected = evaluate_models(self.candidate, self.reference, **options)
+        first = evaluate_models(self.candidate, self.reference, workers=4, **options)
+        second = evaluate_models(self.candidate, self.reference, workers=4, **options)
+        self.assertEqual(first, expected)
+        self.assertEqual(second, expected)
+        self.assertEqual(first.win_rate, 0.5)
+
+    def test_parallel_evaluation_uses_two_batched_model_services(self):
+        observed = []
+
+        class RecordingEvaluator(BatchedEvaluator):
+            def close(evaluator):
+                observed.append(evaluator.stats)
+                super().close()
+
+        with patch("kingdom_ai.evaluation.BatchedEvaluator", RecordingEvaluator):
+            result = evaluate_models(
+                self.candidate, self.reference, games=4, simulations=2,
+                seed=713, opening_moves=2, workers=99,
+            )
+        self.assertEqual(result.win_rate, 0.5)
+        self.assertEqual(len(observed), 2)
+        self.assertTrue(all(stats["network_evaluations"] > 0 for stats in observed))
+        self.assertTrue(all(stats["max_observed_batch_size"] <= 4 for stats in observed))
+
+    def test_parallel_inference_failure_closes_services_and_restores_modes(self):
+        self.candidate.train()
+        self.reference.eval()
+        modes = {module: module.training for model in (self.candidate, self.reference)
+                 for module in model.modules()}
+        with patch.object(PolicyValueNet, "forward",
+                          side_effect=LookupError("parallel inference failed")), \
+                self.assertRaisesRegex(LookupError, "parallel inference failed"):
+            evaluate_models(
+                self.candidate, self.reference, games=4, simulations=2,
+                opening_moves=2, workers=4,
+            )
+        self.assertEqual({module: module.training for module in modes}, modes)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA device is unavailable")
+    def test_parallel_cuda_evaluation_matches_sequential_pairs(self):
+        candidate = self.candidate.to("cuda")
+        reference = self.reference.to("cuda")
+        options = dict(games=4, simulations=2, seed=619, opening_moves=2,
+                       tactical_checks=True)
+        expected = evaluate_models(candidate, reference, **options)
+        for _ in range(3):
+            actual = evaluate_models(candidate, reference, workers=4, **options)
+            self.assertEqual(actual, expected)
+        self.assertTrue(all(parameter.device.type == "cuda"
+                            for model in (candidate, reference)
+                            for parameter in model.parameters()))
 
     def test_actor_colors_budgets_seeds_and_opening_schedule(self):
         constructions = []
@@ -236,6 +293,7 @@ class EvaluationTest(unittest.TestCase):
             "opening_moves": (-1, True, 1.0),
             "opening_temperature": (-1, float("nan"), float("inf"), True, "1"),
             "tactical_checks": (None, 0, 1, "true"),
+            "workers": (0, -1, True, 1.0),
         }
         with patch("kingdom_ai.evaluation.PUCT") as searcher:
             for name, values in invalid.items():

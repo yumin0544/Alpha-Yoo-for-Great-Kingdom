@@ -309,18 +309,28 @@ API와 타이밍 기준은 [GPU PUCT 안내](docs/gpu_puct.md)에 있다.
 중단 후 처음부터 다시 수행한다. 설정과 API는
 [강화학습 루프 안내](docs/training_loop.md)에 있다.
 
+기존·새 지표의 위치/초, 단계별 병목, 흑백 평가 편향, replay 회전과 목표
+반복까지의 예상 기록 시간을 요약할 수 있다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\analyze_training.py runs\gpu-r1-tuned\metrics.jsonl --recent 10 --target-iterations 300
+```
+
 GPU 규칙·PUCT로 128판을 함께 생성하고 GPU에서 가중치를 학습하려면
 자가 대국 경로와 학습 장치를 모두 CUDA로 지정한다.
 
 ```powershell
-.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
+.\.venv\Scripts\python.exe examples\train.py --device cuda --self-play-backend cuda --self-play-batch-size 128 --evaluation-workers 12 --iterations 1 --games-per-iteration 128 --simulations 32 --train-steps 8 --batch-size 64 --eval-games 20 --eval-simulations 32 --output runs\gpu-rl
 .\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
 ```
 
 학습용 루트 잡음 비율 0.25와 착수 온도 1.0은 기본적으로 켜져 있다.
 자가 대국의 입력·방문 정책·최종 승패는 CPU 자료 버퍼로 회수하고, 승격된
-모델은 다음 반복의 자료 생성에 사용한다. 평가는 기존 C++ 규칙·PUCT로
-순차 대국하며 신경망 추론은 CUDA를 사용한다. CLI와 지표 파일에 실제
+모델은 다음 반복의 자료 생성에 사용한다. 평가는 기존 C++ 규칙·PUCT를
+대국별로 분리하고 동시 신경망 추론을 CUDA batch로 묶는다. 기본값은 호환성을
+위해 순차 worker 1이며 위 예시는 이 PC 실측 최선인 12를 사용한다. 버전 4
+체크포인트는 이 값을 저장해 재개 시 복원한다. 버전 1~3 파일에서 처음 병렬
+평가를 쓸 때는 명령에 한 번 지정하면 다음 저장부터 유지된다. CLI와 지표 파일에 실제
 자료 생성 처리량, 학습·평가 시간과 전체 반복 처리량을 기록한다.
 잡음 없는 벤치마크의 36.79판/초를 전체 학습 속도로 가정하지 않는다.
 GPU 재개 시 `--device cuda`를 지정하고 자가 대국 설정은 체크포인트에서

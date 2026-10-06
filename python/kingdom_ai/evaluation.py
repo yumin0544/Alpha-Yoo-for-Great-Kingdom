@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 import my_board_engine as engine
 import torch
 
+from .batching import BatchedEvaluator
 from .model import PolicyValueNet
 from .puct import PUCT, PUCTOptions, sample_visits
 from .encoding import move_to_action
@@ -109,6 +111,58 @@ def _play_game(
     return game.result.winner, game.result.reason, plies
 
 
+def _play_batched_game(
+    candidate_evaluator: BatchedEvaluator,
+    reference_evaluator: BatchedEvaluator,
+    candidate_color: engine.Cell,
+    *,
+    simulations: int,
+    c_puct: float,
+    seed: int,
+    opening_moves: int,
+    opening_temperature: float,
+    tactical_checks: bool = False,
+) -> tuple[engine.Cell, engine.EndReason, int]:
+    """Play one worker-owned game through shared batched model callbacks."""
+    reference_color = (
+        engine.Cell.White if candidate_color == engine.Cell.Black else engine.Cell.Black
+    )
+    options = PUCTOptions(
+        simulations=simulations, c_puct=c_puct, seed=seed,
+        time_limit_ms=0, dirichlet_epsilon=0,
+    )
+    # A C++ PUCT object owns mutable tree/RNG state, so no searcher is shared
+    # between game workers. Only the thread-safe inference services are shared.
+    searchers = {
+        candidate_color: engine.PUCT(options),
+        reference_color: engine.PUCT(options),
+    }
+    evaluators = {
+        candidate_color: candidate_evaluator,
+        reference_color: reference_evaluator,
+    }
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    game = engine.State()
+    plies = 0
+    while not game.result.finished():
+        actor = game.to_play
+        result = searchers[actor].search(game, evaluators[actor])
+        temperature = opening_temperature if plies < opening_moves else 0.0
+        if tactical_checks:
+            move = _sample_tactical_visits(result, analyze_tactics(game),
+                                           temperature=temperature, generator=generator)
+        else:
+            move = sample_visits(result, temperature=temperature, generator=generator)
+        if not game.play(move).accepted():
+            raise RuntimeError("Evaluation PUCT produced a rejected move")
+        plies += 1
+        if plies > 2 * engine.CELL_COUNT + 2:
+            raise RuntimeError("Evaluation game exceeded its finite move bound")
+    if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
+        raise RuntimeError("A completed evaluation game must have a winner")
+    return game.result.winner, game.result.reason, plies
+
+
 def evaluate_models(
     candidate: PolicyValueNet,
     reference: PolicyValueNet,
@@ -120,6 +174,7 @@ def evaluate_models(
     opening_moves: int = 6,
     opening_temperature: float = 1.0,
     tactical_checks: bool = False,
+    workers: int = 1,
 ) -> EvaluationResult:
     """Play equal-budget pairs, with the candidate first black then white.
 
@@ -131,7 +186,10 @@ def evaluate_models(
 
     Parameters, gradients, model devices, global RNG and thread settings are
     preserved. Every module's train/eval flag is restored, including on error.
-    The function runs games sequentially using the default engine rules.
+    The default ``workers=1`` path retains the original sequential execution.
+    Larger values run independent games in parallel and batch each model's
+    inference requests; the effective worker count is capped at ``games``.
+    All games use the default engine rules.
     With ``tactical_checks=True``, both models take immediate wins and select
     only one-move safe root actions whenever such alternatives exist. Opening
     temperature still samples their actual visits; an unvisited tactical action
@@ -151,6 +209,7 @@ def evaluate_models(
     _real("opening_temperature", opening_temperature, positive=False)
     if type(tactical_checks) is not bool:
         raise TypeError("tactical_checks must be a bool")
+    _integer("workers", workers, 1)
 
     # NeuralAgent restores the top-level flag after each inference. Preserve
     # all flags here as well, because a caller may use mixed module modes.
@@ -159,21 +218,54 @@ def evaluate_models(
     wins = wins_as_black = wins_as_white = total_plies = 0
     endings: dict[str, int] = {}
     try:
-        for pair in range(games // 2):
-            pair_seed = (seed + pair) % (2 ** 64)
-            for color in (engine.Cell.Black, engine.Cell.White):
-                winner, reason, plies = _play_game(
+        jobs = [
+            (color, (seed + pair) % (2 ** 64))
+            for pair in range(games // 2)
+            for color in (engine.Cell.Black, engine.Cell.White)
+        ]
+        if workers == 1:
+            results = [
+                _play_game(
                     candidate, reference, color, simulations=simulations,
                     c_puct=c_puct, seed=pair_seed, opening_moves=opening_moves,
                     opening_temperature=opening_temperature,
                     tactical_checks=tactical_checks,
                 )
-                total_plies += plies
-                endings[reason.name] = endings.get(reason.name, 0) + 1
-                if winner == color:
-                    wins += 1
-                    wins_as_black += color == engine.Cell.Black
-                    wins_as_white += color == engine.Cell.White
+                for color, pair_seed in jobs
+            ]
+        else:
+            worker_count = min(workers, games)
+            candidate_device = next(candidate.parameters()).device
+            reference_device = next(reference.parameters()).device
+            with BatchedEvaluator(
+                candidate, device=candidate_device, max_batch_size=worker_count,
+                max_wait_ms=0,
+            ) as candidate_evaluator, BatchedEvaluator(
+                reference, device=reference_device, max_batch_size=worker_count,
+                max_wait_ms=0,
+            ) as reference_evaluator:
+                def play(job):
+                    color, pair_seed = job
+                    return _play_batched_game(
+                        candidate_evaluator, reference_evaluator, color,
+                        simulations=simulations, c_puct=c_puct, seed=pair_seed,
+                        opening_moves=opening_moves,
+                        opening_temperature=opening_temperature,
+                        tactical_checks=tactical_checks,
+                    )
+
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    # executor.map preserves paired input order even though games
+                    # finish out of order, keeping aggregation deterministic.
+                    results = list(pool.map(play, jobs))
+
+        for (color, _), (winner, reason, plies) in zip(jobs, results):
+            total_plies += plies
+            endings[reason.name] = endings.get(reason.name, 0) + 1
+            if winner == color:
+                wins += 1
+                wins_as_black += color == engine.Cell.Black
+                wins_as_white += color == engine.Cell.White
     finally:
         for module, training in modes.items():
             module.training = training

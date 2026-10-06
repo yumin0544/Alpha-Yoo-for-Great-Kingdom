@@ -43,6 +43,8 @@ def main():
                         help="자가 대국 초반 몇 수까지 기존 온도 사용; 이후 --final-temperature")
     parser.add_argument("--threads", type=positive_integer, default=1,
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
+    parser.add_argument("--evaluation-workers", type=positive_integer,
+                        help="평가 병렬 worker 수; 새 학습 기본 1, 재개 시 저장값 복원")
     parser.add_argument("--channels", type=positive_integer, help="새 모델 채널 수 (기본 32)")
     parser.add_argument("--residual-blocks", type=int, help="새 모델 잔차 블록 수 (기본 2)")
     integer_flags = {
@@ -94,7 +96,10 @@ def main():
     torch.set_num_threads(args.threads)
     try:
         if args.resume:
-            trainer = Trainer.load_checkpoint(args.resume, device=args.device)
+            trainer = Trainer.load_checkpoint(
+                args.resume, device=args.device,
+                evaluation_workers=args.evaluation_workers,
+            )
             if args.reconfigure:
                 trainer.reconfigure(**overrides)
         else:
@@ -108,10 +113,17 @@ def main():
                         channels=32 if args.channels is None else args.channels,
                         residual_blocks=2 if args.residual_blocks is None else args.residual_blocks,
                     )
-            trainer = Trainer(config, model=model, device=args.device)
+            trainer = Trainer(
+                config, model=model, device=args.device,
+                evaluation_workers=(1 if args.evaluation_workers is None
+                                    else args.evaluation_workers),
+            )
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(str(error))
-    print(f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판")
+    print(
+        f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판, "
+        f"평가 worker {trainer.evaluation_workers}개"
+    )
     print(json.dumps(asdict(trainer.config), ensure_ascii=False))
     print("평가 승률은 현재 기준 모델에 대한 결과이며, 절대 기력은 별도 검증해야 합니다.")
 
@@ -126,23 +138,29 @@ def main():
             f"자가 대국 {row['self_play_backend']} "
             f"{row['self_play_games_per_second']:.2f}판/초, "
             f"전체 반복 {row['iteration_games_per_second']:.2f}판/초, "
-            f"자료 생성 {row['self_play_seconds']:.2f}초, "
+            f"위치 {row['self_play_positions_per_second']:.1f}개/초, "
+            f"자가 대국 계산 {row['self_play_compute_seconds']:.2f}초, "
+            f"버퍼 저장 {row['replay_store_seconds']:.2f}초, "
             f"학습 {row['training_seconds']:.2f}초, "
             f"평가 {row['evaluation_seconds']:.2f}초, "
-            f"경과 {row['elapsed_seconds']:.2f}초", flush=True,
+            f"체크포인트 {row['checkpoint_seconds']:.2f}초, "
+            f"경과 {row['elapsed_with_checkpoint_seconds']:.2f}초", flush=True,
         )
 
     try:
-        trainer.save_checkpoint(latest)
-        trainer.export_champion(best)
         if not args.prepare_only:
             trainer.run(args.iterations, checkpoint_path=latest, metrics_path=metrics,
                         on_iteration=report, collect_metrics=False)
         else:
+            trainer.save_checkpoint(latest)
+            trainer.export_champion(best)
             print("설정과 학습 상태를 저장했습니다. 추가 학습은 시작하지 않았습니다.")
     except KeyboardInterrupt:
-        print(f"\n중단했습니다. 마지막 완료·저장한 반복부터 재개: {latest.resolve()}")
-        print("진행 중이던 반복의 대국과 학습은 체크포인트를 읽은 뒤 다시 실행합니다.")
+        if latest.exists():
+            print(f"\n중단했습니다. 마지막 완료·저장한 반복부터 재개: {latest.resolve()}")
+            print("진행 중이던 반복의 대국과 학습은 체크포인트를 읽은 뒤 다시 실행합니다.")
+        else:
+            print("\n초기 체크포인트 저장 전에 중단했습니다. 같은 명령으로 새로 시작하세요.")
         return 130
     print(f"학습 재개 파일: {latest.resolve()}")
     print(f"기준 모델 파일: {best.resolve()}")

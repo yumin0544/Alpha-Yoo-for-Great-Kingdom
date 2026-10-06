@@ -73,6 +73,7 @@ class StrengthConfigTest(unittest.TestCase):
         self.trainer.save_checkpoint(original)
         payload = torch.load(original, weights_only=True)
         payload["checkpoint_version"] = 2
+        payload.pop("runtime")
         for key in loop._STRENGTH_CONFIG_KEYS:
             payload["config"].pop(key)
         legacy = self.path / "v2.pt"
@@ -84,7 +85,26 @@ class StrengthConfigTest(unittest.TestCase):
         equal(self, restored.replay.state_dict(), self.trainer.replay.state_dict())
         self.assertTrue(torch.equal(restored.generator.get_state(), self.trainer.generator.get_state()))
         restored.save_checkpoint(self.path / "upgraded.pt")
-        self.assertEqual(torch.load(self.path / "upgraded.pt", weights_only=True)["checkpoint_version"], 3)
+        self.assertEqual(torch.load(self.path / "upgraded.pt", weights_only=True)["checkpoint_version"], 4)
+
+    def test_version_three_defaults_workers_and_upgrades_runtime_settings(self):
+        source = self.path / "v4.pt"
+        self.trainer.save_checkpoint(source)
+        payload = torch.load(source, weights_only=True)
+        payload["checkpoint_version"] = 3
+        payload.pop("runtime")
+        legacy = self.path / "v3.pt"
+        torch.save(payload, legacy)
+
+        restored = Trainer.load_checkpoint(legacy)
+        self.assertEqual(restored.evaluation_workers, 1)
+        overridden = Trainer.load_checkpoint(legacy, evaluation_workers=12)
+        self.assertEqual(overridden.evaluation_workers, 12)
+        upgraded = self.path / "upgraded-v4.pt"
+        overridden.save_checkpoint(upgraded)
+        upgraded_payload = torch.load(upgraded, weights_only=True)
+        self.assertEqual(upgraded_payload["checkpoint_version"], 4)
+        self.assertEqual(upgraded_payload["runtime"], {"evaluation_workers": 12})
 
     def test_reconfiguration_preserves_progress_weights_replay_rng_and_adam_moments(self):
         self.run_one(self.trainer)

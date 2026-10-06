@@ -108,7 +108,7 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 3
+_CHECKPOINT_VERSION = 4
 _GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
 _STRENGTH_CONFIG_KEYS = {
     "augment_symmetries", "temperature_moves", "final_temperature",
@@ -123,8 +123,10 @@ _SCHEMA = {
 }
 _CHECKPOINT_KEYS = {
     "checkpoint_version", "schema", "config", "model_config", "model", "champion",
-    "optimizer", "replay", "progress", "generator_state", "rng", "last_metrics",
+    "optimizer", "replay", "progress", "generator_state", "rng", "runtime",
+    "last_metrics",
 }
+_RUNTIME_KEYS = {"evaluation_workers"}
 _PROGRESS_KEYS = {"iteration", "self_play_games", "training_steps", "champion_version"}
 
 
@@ -251,13 +253,19 @@ class Trainer:
     interrupted iteration must be discarded by loading the last checkpoint.
     """
 
-    def __init__(self, config=TrainingConfig(), model=None, device="cpu"):
+    def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1):
         if not isinstance(config, TrainingConfig):
             raise TypeError("config must be a TrainingConfig")
         if model is not None and not isinstance(model, PolicyValueNet):
             raise TypeError("model must be a PolicyValueNet")
+        if type(evaluation_workers) is not int or evaluation_workers < 1:
+            raise ValueError("evaluation_workers must be a positive integer")
         self.config = config
         self.device = torch.device(device)
+        # Parallel batching can change floating-point scheduling, so preserve
+        # this operational setting in checkpoints even though it is not part of
+        # TrainingConfig and can be explicitly overridden when loading.
+        self.evaluation_workers = evaluation_workers
         if config.self_play_backend == "cuda":
             if self.device.type != "cuda":
                 raise ValueError("CUDA self-play requires a CUDA Trainer device (device='cuda')")
@@ -355,15 +363,42 @@ class Trainer:
         started = perf_counter()
         config = self.config
         endings = {}
+        winners = {"Black": 0, "White": 0}
+        game_plies = []
         plies = samples = 0
+        replay_store_seconds = 0.0
+        pending_samples = []
+        pending_games = 0
+
+        def flush_replay():
+            nonlocal replay_store_seconds, pending_games
+            if not pending_samples:
+                return
+            replay_started = perf_counter()
+            self.replay.extend(pending_samples)
+            replay_store_seconds += perf_counter() - replay_started
+            pending_samples.clear()
+            pending_games = 0
+
         for data in self._collect_games():
-            self.replay.extend(data.samples)
+            pending_samples.extend(data.samples)
+            pending_games += 1
             self.self_play_games += 1
             samples += len(data.samples)
             plies += len(data.samples)
+            game_plies.append(len(data.samples))
             endings[data.reason.name] = endings.get(data.reason.name, 0) + 1
+            winners[data.winner.name] += 1
+            # CUDA collection already materializes one complete game chunk.
+            # Insert that chunk in one vectorized replay operation. CPU games
+            # remain streaming so sequential collection does not accumulate.
+            if (config.self_play_backend == "cpu"
+                    or pending_games == config.self_play_batch_size):
+                flush_replay()
+        flush_replay()
         self._synchronize()
         self_play_seconds = perf_counter() - started
+        self_play_compute_seconds = max(0.0, self_play_seconds - replay_store_seconds)
         training_started = perf_counter()
         loss_totals = dict.fromkeys(("loss", "policy_loss", "value_loss"), 0.0)
         for _ in range(config.train_steps_per_iteration):
@@ -384,6 +419,7 @@ class Trainer:
             simulations=config.evaluation_simulations, c_puct=config.c_puct,
             seed=self._next_seed(), opening_moves=config.evaluation_opening_moves,
             opening_temperature=config.evaluation_opening_temperature,
+            workers=self.evaluation_workers,
             **evaluation_options,
         )
         promoted = evaluation.win_rate >= config.promotion_threshold
@@ -394,24 +430,50 @@ class Trainer:
         evaluation_seconds = perf_counter() - evaluation_started
         self.iteration += 1
         elapsed_seconds = perf_counter() - started
+        training_samples_drawn = config.batch_size * config.train_steps_per_iteration
+        retained_new_samples = min(samples, len(self.replay))
+        sorted_plies = sorted(game_plies)
+        p95_plies = sorted_plies[math.ceil(0.95 * len(sorted_plies)) - 1]
         metrics = {
+            "metrics_schema_version": 2,
             "iteration": self.iteration, "self_play_games": self.self_play_games,
             "training_steps": self.training_steps, "champion_version": self.champion_version,
             "generated_samples": samples, "replay_size": len(self.replay),
             "mean_self_play_plies": plies / config.games_per_iteration,
+            "p95_self_play_plies": p95_plies,
+            "max_self_play_plies": sorted_plies[-1],
             "self_play_endings": endings,
+            "self_play_winners": winners,
             **{key: value / config.train_steps_per_iteration for key, value in loss_totals.items()},
             "evaluation": {**asdict(evaluation), "win_rate": evaluation.win_rate},
             "promoted": promoted, "self_play_seconds": self_play_seconds,
+            "self_play_compute_seconds": self_play_compute_seconds,
+            "replay_store_seconds": replay_store_seconds,
             "training_seconds": training_seconds, "evaluation_seconds": evaluation_seconds,
             "elapsed_seconds": elapsed_seconds,
+            "evaluation_workers": self.evaluation_workers,
             "self_play_backend": config.self_play_backend,
             "self_play_batch_size": config.self_play_batch_size,
+            "games_per_iteration": config.games_per_iteration,
+            "replay_capacity": config.replay_capacity,
+            "retained_new_samples": retained_new_samples,
+            "retained_new_sample_ratio": retained_new_samples / samples,
+            "replay_turnover": samples / config.replay_capacity,
+            "training_batch_size": config.batch_size,
+            "train_steps_per_iteration": config.train_steps_per_iteration,
+            "training_samples_drawn": training_samples_drawn,
+            "training_draws_per_generated_sample": training_samples_drawn / samples,
+            "training_draws_per_replay_sample": training_samples_drawn / len(self.replay),
             "augment_symmetries": config.augment_symmetries,
             "self_play_simulations": config.simulations,
             "self_play_tactical_checks": config.self_play_tactical_checks,
             "self_play_fpu_reduction": config.self_play_fpu_reduction,
             "self_play_games_per_second": config.games_per_iteration / self_play_seconds,
+            "self_play_positions_per_second": samples / self_play_seconds,
+            "self_play_compute_positions_per_second": (
+                samples / self_play_compute_seconds if self_play_compute_seconds else 0.0),
+            "replay_store_positions_per_second": (
+                samples / replay_store_seconds if replay_store_seconds else 0.0),
             "iteration_games_per_second": config.games_per_iteration / elapsed_seconds,
         }
         # Reject non-finite metrics before permitting a resumable boundary save.
@@ -433,18 +495,26 @@ class Trainer:
             "rng": {"python": random.getstate(), "torch_cpu": torch.get_rng_state().clone(),
                     "torch_cuda": ([state.cpu().clone() for state in torch.cuda.get_rng_state_all()]
                                    if torch.cuda.is_available() else [])},
+            "runtime": {"evaluation_workers": self.evaluation_workers},
             "last_metrics": deepcopy(self._last_metrics),
         }
         _atomic_write(path, lambda temporary: torch.save(payload, temporary))
 
     @classmethod
-    def load_checkpoint(cls, path, device="cpu"):
+    def load_checkpoint(cls, path, device="cpu", evaluation_workers=None):
+        if (evaluation_workers is not None
+                and (type(evaluation_workers) is not int or evaluation_workers < 1)):
+            raise ValueError("evaluation_workers must be None or a positive integer")
         payload = torch.load(Path(path), map_location="cpu", weights_only=True)
-        if not isinstance(payload, dict) or set(payload) != _CHECKPOINT_KEYS:
+        if not isinstance(payload, dict):
             raise ValueError("Unexpected training checkpoint fields")
-        version = payload["checkpoint_version"]
-        if type(version) is not int or version not in (1, 2, _CHECKPOINT_VERSION):
+        version = payload.get("checkpoint_version")
+        if type(version) is not int or version not in (1, 2, 3, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
+        expected_keys = (_CHECKPOINT_KEYS if version >= 4
+                         else _CHECKPOINT_KEYS - {"runtime"})
+        if set(payload) != expected_keys:
+            raise ValueError("Unexpected training checkpoint fields")
         if not _same_primitive(payload["schema"], _SCHEMA):
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
@@ -495,7 +565,18 @@ class Trainer:
         cuda_states = payload["rng"]["torch_cuda"]
         if cuda_states and torch.cuda.is_available() and len(cuda_states) != torch.cuda.device_count():
             raise ValueError("CUDA device count differs from the saved RNG configuration")
-        trainer = cls(config, model=model, device=device)
+        saved_evaluation_workers = 1
+        if version >= 4:
+            runtime = payload["runtime"]
+            if (not isinstance(runtime, dict) or set(runtime) != _RUNTIME_KEYS
+                    or type(runtime["evaluation_workers"]) is not int
+                    or runtime["evaluation_workers"] < 1):
+                raise ValueError("Invalid checkpoint runtime settings")
+            saved_evaluation_workers = runtime["evaluation_workers"]
+        trainer = cls(config, model=model, device=device,
+                      evaluation_workers=(saved_evaluation_workers
+                                          if evaluation_workers is None
+                                          else evaluation_workers))
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay
@@ -527,13 +608,33 @@ class Trainer:
         if (checkpoint_path is not None and metrics_path is not None
                 and Path(checkpoint_path).resolve() == Path(metrics_path).resolve()):
             raise ValueError("Checkpoint and metrics paths must be different")
+        initial_checkpoint_seconds = 0.0
         if checkpoint_path is not None:
+            initial_checkpoint_started = perf_counter()
             self.save_checkpoint(checkpoint_path)
+            initial_checkpoint_seconds = perf_counter() - initial_checkpoint_started
         output = []
-        for _ in range(iterations):
+        for run_index in range(iterations):
             metrics = self.run_iteration()
+            checkpoint_seconds = 0.0
+            checkpoint_bytes = 0
             if checkpoint_path is not None:
+                checkpoint_started = perf_counter()
                 self.save_checkpoint(checkpoint_path)
+                checkpoint_seconds = perf_counter() - checkpoint_started
+                checkpoint_bytes = Path(checkpoint_path).stat().st_size
+            metrics["checkpoint_seconds"] = checkpoint_seconds
+            metrics["initial_checkpoint_seconds"] = (
+                initial_checkpoint_seconds if run_index == 0 else 0.0)
+            metrics["checkpoint_bytes"] = checkpoint_bytes
+            metrics["checkpoint_written"] = checkpoint_path is not None
+            metrics["elapsed_with_checkpoint_seconds"] = (
+                metrics["elapsed_seconds"] + checkpoint_seconds
+                + metrics["initial_checkpoint_seconds"])
+            json.dumps(metrics, allow_nan=False)
+            # A checkpoint cannot contain the duration of its own write. These
+            # operational fields therefore live in JSONL/return/callback data;
+            # checkpoint last_metrics remains the resumable iteration payload.
             if metrics_path is not None:
                 target = Path(metrics_path)
                 target.parent.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,7 @@ from .training import TrainingBatch, TrainingSample
 
 
 _STATE_VERSION = 1
+_BULK_ROWS = 4096
 _STATE_KEYS = {
     "version", "capacity", "size", "next_index", "features", "legal_mask",
     "policy", "value", "to_play",
@@ -73,7 +74,7 @@ def _validate_rows(features, legal_mask, policy, value, to_play):
         raise ValueError("Completed-game replay values must be -1 or +1")
 
 
-def _prepare_sample(sample):
+def _prepare_sample_components(sample):
     if not isinstance(sample, TrainingSample):
         raise TypeError("Replay entries must be TrainingSample objects")
     features = _cpu_tensor(sample.features, (INPUT_CHANNELS, BOARD_SIZE, BOARD_SIZE),
@@ -88,11 +89,18 @@ def _prepare_sample(sample):
             or sample.to_play not in (engine.Cell.Black, engine.Cell.White)):
         raise ValueError("Sample actor must be Black or White")
     actor = 1 if sample.to_play == engine.Cell.Black else 2
-    value = torch.tensor([float(sample.value)], dtype=torch.float32, device="cpu")
-    actors = torch.tensor([actor], dtype=torch.int8, device="cpu")
-    _validate_rows(features.unsqueeze(0), legal_mask.unsqueeze(0), policy.unsqueeze(0),
-                   value, actors)
     return features, legal_mask, policy, float(sample.value), actor
+
+
+def _stack_components(rows):
+    """Materialize a bounded group of sample views as contiguous CPU rows."""
+    return (
+        torch.stack([row[0] for row in rows]),
+        torch.stack([row[1] for row in rows]),
+        torch.stack([row[2] for row in rows]),
+        torch.tensor([row[3] for row in rows], dtype=torch.float32, device="cpu"),
+        torch.tensor([row[4] for row in rows], dtype=torch.int8, device="cpu"),
+    )
 
 
 class ReplayBuffer:
@@ -125,22 +133,30 @@ class ReplayBuffer:
     def extend(self, samples: Iterable[TrainingSample]) -> None:
         """Validate the complete input before replacing any existing positions."""
         incoming = list(samples)
-        # Do not partially mutate the ring if a later sample is malformed.
-        for sample in incoming:
-            _prepare_sample(sample)
         if not incoming:
             return
+        # Keep validation atomic, but validate tensor contents in large vectorized
+        # groups instead of launching dozens of tiny operations per position.
+        prepared = [_prepare_sample_components(sample) for sample in incoming]
+        for start in range(0, len(prepared), _BULK_ROWS):
+            _validate_rows(*_stack_components(prepared[start:start + _BULK_ROWS]))
+
         # Skip writes that would be immediately evicted, but preserve ring slots.
         skipped = max(0, len(incoming) - self._capacity)
         index = (self._next_index + skipped) % self._capacity
-        for sample in incoming[skipped:]:
-            features, legal_mask, policy, value, actor = _prepare_sample(sample)
-            self._features[index].copy_(features)
-            self._legal_mask[index].copy_(legal_mask)
-            self._policy[index].copy_(policy)
-            self._value[index] = value
-            self._to_play[index] = actor
-            index = (index + 1) % self._capacity
+        offset = skipped
+        while offset < len(prepared):
+            count = min(_BULK_ROWS, len(prepared) - offset, self._capacity - index)
+            features, legal_mask, policy, value, actor = _stack_components(
+                prepared[offset:offset + count])
+            target = slice(index, index + count)
+            self._features[target].copy_(features)
+            self._legal_mask[target].copy_(legal_mask)
+            self._policy[target].copy_(policy)
+            self._value[target].copy_(value)
+            self._to_play[target].copy_(actor)
+            offset += count
+            index = (index + count) % self._capacity
         self._next_index = index
         self._size = min(self._capacity, self._size + len(incoming))
 

@@ -72,11 +72,12 @@ class ReinforcementTest(unittest.TestCase):
             promotion_threshold=0.55, seed=914,
         )
 
-    def trainer(self):
+    def trainer(self, evaluation_workers=1):
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(127)
             model = PolicyValueNet(channels=8, residual_blocks=1)
-        return Trainer(config=self.config, model=model, device="cpu")
+        return Trainer(config=self.config, model=model, device="cpu",
+                       evaluation_workers=evaluation_workers)
 
     def assert_tree_equal(self, left, right):
         if isinstance(left, torch.Tensor):
@@ -113,7 +114,7 @@ class ReinforcementTest(unittest.TestCase):
     def test_actual_selfplay_training_evaluation_and_exact_cpu_resume(self):
         initial_python = random.getstate()
         initial_torch = torch.get_rng_state().clone()
-        uninterrupted = self.trainer()
+        uninterrupted = self.trainer(evaluation_workers=2)
         uninterrupted.run(2)
         expected = self.trainer_state(uninterrupted)
         next_python = [random.random() for _ in range(5)]
@@ -121,10 +122,11 @@ class ReinforcementTest(unittest.TestCase):
 
         random.setstate(initial_python)
         torch.set_rng_state(initial_torch)
-        interrupted = self.trainer()
+        interrupted = self.trainer(evaluation_workers=2)
         checkpoint = self.path / "resume.pt"
         interrupted.run(1, checkpoint_path=checkpoint)
         resumed = Trainer.load_checkpoint(checkpoint, device="cpu")
+        self.assertEqual(resumed.evaluation_workers, 2)
         self.assertEqual(asdict(resumed.config), asdict(self.config))
         self.assert_tree_equal(self.trainer_state(interrupted), self.trainer_state(resumed))
         resumed.run(1)
@@ -168,6 +170,53 @@ class ReinforcementTest(unittest.TestCase):
         self.assertEqual(trainer.iteration, 2)
         self.assertEqual(trainer.training_steps, 4)
 
+    def test_iteration_metrics_expose_replay_cost_and_data_ratios(self):
+        trainer = self.trainer(evaluation_workers=3)
+        with patch.object(loop, "collect_puct_game", return_value=pass_game()), \
+                patch.object(loop, "evaluate_models", return_value=evaluation(0)) as evaluator:
+            metrics = trainer.run_iteration()
+
+        self.assertEqual(metrics["generated_samples"], 4)
+        self.assertEqual(metrics["self_play_winners"], {"Black": 0, "White": 2})
+        self.assertEqual(metrics["mean_self_play_plies"], 2)
+        self.assertEqual(metrics["p95_self_play_plies"], 2)
+        self.assertEqual(metrics["max_self_play_plies"], 2)
+        self.assertEqual(metrics["games_per_iteration"], 2)
+        self.assertEqual(metrics["replay_capacity"], 64)
+        self.assertEqual(metrics["retained_new_samples"], 4)
+        self.assertEqual(metrics["retained_new_sample_ratio"], 1.0)
+        self.assertEqual(metrics["training_samples_drawn"], 8)
+        self.assertEqual(metrics["training_draws_per_generated_sample"], 2.0)
+        self.assertEqual(metrics["training_draws_per_replay_sample"], 2.0)
+        self.assertEqual(metrics["evaluation_workers"], 3)
+        self.assertEqual(evaluator.call_args.kwargs["workers"], 3)
+        self.assertGreaterEqual(metrics["replay_store_seconds"], 0.0)
+        self.assertGreater(metrics["self_play_positions_per_second"], 0.0)
+        self.assertGreaterEqual(metrics["replay_store_positions_per_second"], 0.0)
+
+    def test_evaluation_workers_are_checkpointed_and_validated(self):
+        for value in (0, -1, True, 1.0):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.trainer(evaluation_workers=value)
+
+        trainer = self.trainer(evaluation_workers=4)
+        checkpoint = self.path / "workers.pt"
+        trainer.save_checkpoint(checkpoint)
+        self.assertEqual(Trainer.load_checkpoint(checkpoint).evaluation_workers, 4)
+        self.assertEqual(
+            Trainer.load_checkpoint(checkpoint, evaluation_workers=2).evaluation_workers,
+            2,
+        )
+        with self.assertRaises(ValueError):
+            Trainer.load_checkpoint(checkpoint, evaluation_workers=0)
+
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        payload["runtime"]["evaluation_workers"] = 0
+        broken = self.path / "broken-workers.pt"
+        torch.save(payload, broken)
+        with self.assertRaisesRegex(ValueError, "runtime"):
+            Trainer.load_checkpoint(broken)
+
     def test_distinct_selfplay_seeds_and_requested_noise_budget(self):
         trainer = self.trainer()
         seeds = []
@@ -199,9 +248,10 @@ class ReinforcementTest(unittest.TestCase):
 
         def after_iteration(metrics):
             restored = Trainer.load_checkpoint(checkpoint)
-            observations.append(restored.iteration)
+            observations.append((restored.iteration, copy.deepcopy(metrics)))
             self.assertIsInstance(metrics, dict)
             self.assertEqual(restored.iteration, trainer.iteration)
+            self.assertNotIn("checkpoint_seconds", restored._last_metrics)
 
         with patch.object(loop, "collect_puct_game", return_value=pass_game()), \
                 patch.object(loop, "evaluate_models", return_value=evaluation(0)):
@@ -209,11 +259,21 @@ class ReinforcementTest(unittest.TestCase):
                         on_iteration=after_iteration)
             trainer.run(1, checkpoint_path=checkpoint, metrics_path=metrics_path,
                         on_iteration=after_iteration)
-        self.assertEqual(observations, [1, 2])
+        self.assertEqual([item[0] for item in observations], [1, 2])
         self.assertEqual(trainer.iteration, 2)
         rows = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(len(rows), 2)
-        self.assertTrue(all(isinstance(row, dict) for row in rows))
+        self.assertEqual(rows, [item[1] for item in observations])
+        for row in rows:
+            self.assertTrue(row["checkpoint_written"])
+            self.assertGreaterEqual(row["initial_checkpoint_seconds"], 0.0)
+            self.assertGreaterEqual(row["checkpoint_seconds"], 0.0)
+            self.assertGreater(row["checkpoint_bytes"], 0)
+            self.assertAlmostEqual(
+                row["elapsed_with_checkpoint_seconds"],
+                row["elapsed_seconds"] + row["initial_checkpoint_seconds"]
+                + row["checkpoint_seconds"],
+            )
         self.assertEqual(Trainer.load_checkpoint(checkpoint).iteration, 2)
 
     def test_streamed_run_avoids_accumulating_metrics_and_keeps_logs_and_callbacks(self):
@@ -234,6 +294,7 @@ class ReinforcementTest(unittest.TestCase):
         self.assertEqual(seen, [1, 2, 3])
         rows = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([row["iteration"] for row in rows], seen)
+        self.assertTrue(all(row["checkpoint_written"] is False for row in rows))
         checkpoint = self.path / "streamed.pt"
         trainer.save_checkpoint(checkpoint)
         self.assertEqual(Trainer.load_checkpoint(checkpoint).iteration, 3)
