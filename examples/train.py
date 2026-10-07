@@ -39,6 +39,25 @@ def main():
                         default=None, help="CUDA 루트에서 즉시 승리·패배와 한 수 포획 위협 확인")
     parser.add_argument("--self-play-fpu-reduction", type=float,
                         help="CUDA 미방문 수 가치=신경망 가치-지정값 (미지정은 기존 Q=0)")
+    parser.add_argument("--online-tactics", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="매 사이클 새 자가 대국 위치의 깊은 승리 증명과 전술 혼합 학습")
+    parser.add_argument("--online-tactics-max-cases", type=positive_integer, default=None,
+                        help="사이클당 CPU 전술 탐색 위치 상한 (새 학습 기본 32)")
+    parser.add_argument("--online-tactics-max-depth", type=positive_integer, default=None,
+                        help="양쪽 착수를 합친 전술 증명 깊이 (새 학습 기본 9수)")
+    parser.add_argument("--online-tactics-max-nodes", type=positive_integer, default=None,
+                        help="위치당 전술 증명 노드 상한 (새 학습 기본 2000000)")
+    parser.add_argument("--online-tactics-time-limit-ms", type=positive_integer, default=None,
+                        help="위치당 CPU 전술 증명 시간 예산 ms (새 학습 기본 2000)")
+    parser.add_argument("--online-tactics-generation-seconds", type=float, default=None,
+                        help="사이클당 새 전술 자료 생성 시간 예산 (새 학습 기본 30초)")
+    parser.add_argument("--online-tactics-fraction", type=float, default=None,
+                        help="증명 버퍼가 있을 때 미니배치 전술 비율 (새 학습 기본 0.25)")
+    parser.add_argument("--online-tactics-replay-capacity", type=positive_integer, default=None,
+                        help="일반 replay와 분리된 증명 위치 FIFO 용량 (새 학습 기본 1024)")
+    parser.add_argument("--online-tactics-min-proof-depth", type=positive_integer, default=None,
+                        help="혼합 학습에 채택할 최소 증명 수순 길이 (새 학습 기본 3수)")
     parser.add_argument("--temperature-moves", type=int,
                         help="자가 대국 초반 몇 수까지 기존 온도 사용; 이후 --final-temperature")
     parser.add_argument("--threads", type=positive_integer, default=1,
@@ -161,6 +180,16 @@ def main():
             f"체크포인트 {row['checkpoint_seconds']:.2f}초, "
             f"경과 {row['elapsed_with_checkpoint_seconds']:.2f}초", flush=True,
         )
+        online_tactics = row.get("online_tactics", {})
+        if online_tactics.get("enabled", False):
+            print(
+                f"온라인 전술: 새 증명 {online_tactics['added_samples']}개, "
+                f"증명 버퍼 {online_tactics['replay_size']}개, "
+                f"혼합 갱신 {online_tactics['mixed_updates']}회, "
+                f"미니배치 전술 {online_tactics['tactical_rows_per_batch']}개·"
+                f"일반 {online_tactics['replay_rows_per_batch']}개, "
+                f"teacher {online_tactics['seconds']:.2f}초", flush=True,
+            )
 
     try:
         if not args.prepare_only:

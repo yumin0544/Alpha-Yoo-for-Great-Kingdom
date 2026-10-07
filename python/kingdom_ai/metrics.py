@@ -72,6 +72,7 @@ def load_metric_rows(path) -> tuple[list[dict], int]:
                 )
             if "checkpoint_written" in row and type(row["checkpoint_written"]) is not bool:
                 raise ValueError(f"Metrics line {line_number} has invalid checkpoint_written")
+            _validate_online_tactics(row, prefix=f"Metrics line {line_number}")
             by_iteration[iteration] = row
             parsed_rows += 1
     if not by_iteration:
@@ -83,6 +84,47 @@ def load_metric_rows(path) -> tuple[list[dict], int]:
 def _finite_number(value, *, positive):
     return (not isinstance(value, bool) and isinstance(value, (int, float))
             and math.isfinite(value) and (value > 0 if positive else value >= 0))
+
+
+def _validate_online_tactics(row, *, prefix="Metrics row"):
+    if ("online_tactics_seconds" in row
+            and not _finite_number(row["online_tactics_seconds"], positive=False)):
+        raise ValueError(f"{prefix} has invalid online_tactics_seconds")
+    if ("online_tactics_enabled" in row
+            and type(row["online_tactics_enabled"]) is not bool):
+        raise ValueError(f"{prefix} has invalid online_tactics_enabled")
+    if "online_tactics" not in row:
+        return
+    report = row["online_tactics"]
+    if not isinstance(report, dict):
+        raise ValueError(f"{prefix} has invalid online_tactics report")
+    if "enabled" in report and type(report["enabled"]) is not bool:
+        raise ValueError(f"{prefix} has invalid online_tactics.enabled")
+    for name in ("added_samples", "excluded_shallow", "replay_size", "mixed_updates",
+                 "tactical_rows_per_batch", "replay_rows_per_batch"):
+        if name in report and (type(report[name]) is not int or report[name] < 0):
+            raise ValueError(f"{prefix} has invalid online_tactics.{name}")
+    if "seconds" in report and not _finite_number(report["seconds"], positive=False):
+        raise ValueError(f"{prefix} has invalid online_tactics.seconds")
+
+
+def _online_tactics_summary(rows):
+    reports = [row["online_tactics"] for row in rows if "online_tactics" in row]
+    latest = rows[-1].get("online_tactics", {})
+    return {
+        "timing_covered_iterations": sum("online_tactics_seconds" in row for row in rows),
+        "report_covered_iterations": len(reports),
+        "enabled_iterations": sum(report.get("enabled", False) for report in reports),
+        "added_samples": sum(report.get("added_samples", 0) for report in reports),
+        "excluded_shallow": sum(report.get("excluded_shallow", 0) for report in reports),
+        "mixed_updates": sum(report.get("mixed_updates", 0) for report in reports),
+        "tactical_training_draws": sum(report.get("mixed_updates", 0)
+                                       * report.get("tactical_rows_per_batch", 0)
+                                       for report in reports),
+        "latest_replay_size": latest.get("replay_size"),
+        "latest_tactical_rows_per_batch": latest.get("tactical_rows_per_batch"),
+        "latest_replay_rows_per_batch": latest.get("replay_rows_per_batch"),
+    }
 
 
 def _games(row):
@@ -175,9 +217,12 @@ def summarize_metrics(rows, *, recent=20, target_iterations=None, duplicate_rows
             type(target_iterations) is not int or target_iterations < 1):
         raise ValueError("target_iterations must be a positive integer")
     ordered = sorted(rows, key=lambda row: row["iteration"])
+    for row in ordered:
+        _validate_online_tactics(row)
     recent_rows = ordered[-recent:]
     phase_seconds = {
         "self_play": sum(row["self_play_seconds"] for row in ordered),
+        "online_tactics": sum(row.get("online_tactics_seconds", 0.0) for row in ordered),
         "training": sum(row["training_seconds"] for row in ordered),
         "evaluation": sum(row["evaluation_seconds"] for row in ordered),
     }
@@ -230,6 +275,7 @@ def summarize_metrics(rows, *, recent=20, target_iterations=None, duplicate_rows
         "overall": _window_summary(ordered),
         "recent": recent_summary,
         "phase_seconds": phase_seconds,
+        "online_tactics": _online_tactics_summary(ordered),
         "phase_fractions": {
             **{name: seconds / sum(row["elapsed_seconds"] for row in ordered)
                for name, seconds in phase_seconds.items()},

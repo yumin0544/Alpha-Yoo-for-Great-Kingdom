@@ -57,15 +57,23 @@ def _outcome_name(outcome):
 def collect_certified_samples(cases: Sequence[dict], options, *,
                               load_position: Callable | None = None,
                               solver: Callable | None = None,
-                              max_cases=64, generation_seconds=60.0):
+                              max_cases=64, generation_seconds=60.0,
+                              bound_remaining_time=False):
     """Solve bounded original cases, returning samples and an audit of all cases.
 
     ``winning_moves`` must be root moves proved WIN by the full-width solver.
     Uniform targets over this *known safe subset* do not claim that other
     unproved legal moves are objectively losing. A per-case solver deadline is
     still required: the overall deadline is checked between solver calls.
+    With ``bound_remaining_time=True`` each solver receives no more than the
+    remaining overall milliseconds (engine options only). Position loading and
+    OS scheduling overhead are not a hard real-time bound.
     """
     _integer(max_cases, "max_cases")
+    if type(bound_remaining_time) is not bool:
+        raise ValueError("bound_remaining_time must be a bool")
+    if bound_remaining_time and not isinstance(options, engine.TacticalSolverOptions):
+        raise TypeError("Remaining-budget enforcement requires engine solver options")
     if (isinstance(generation_seconds, bool) or not isinstance(generation_seconds, (int, float))
             or not math.isfinite(generation_seconds) or generation_seconds <= 0):
         raise ValueError("generation_seconds must be finite and positive")
@@ -95,7 +103,18 @@ def collect_certified_samples(cases: Sequence[dict], options, *,
         if state.result.finished():
             records.append({**record, "outcome": "TERMINAL", "training_label": False})
             continue
-        result = solver(state.copy(), options)
+        solve_options = options
+        if bound_remaining_time:
+            remaining_ms = int((generation_seconds - (perf_counter() - started)) * 1000)
+            if remaining_ms < 1:
+                break
+            per_case_ms = (min(options.time_limit_ms, remaining_ms)
+                           if options.time_limit_ms else remaining_ms)
+            per_case_ms = min(per_case_ms, 2 ** 31 - 1)
+            solve_options = engine.TacticalSolverOptions(
+                max_depth=options.max_depth, max_nodes=options.max_nodes,
+                time_limit_ms=per_case_ms)
+        result = solver(state.copy(), solve_options)
         outcome = _outcome_name(result.outcome)
         if outcome not in ("WIN", "LOSS", "UNKNOWN"):
             raise ValueError("Solver returned an unsupported proof outcome")

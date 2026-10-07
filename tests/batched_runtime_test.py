@@ -9,6 +9,7 @@ from unittest.mock import patch
 import torch
 
 from kingdom_ai import PolicyValueNet, Trainer, TrainingConfig
+import kingdom_ai.loop as loop
 
 
 class BatchedRuntimeTest(unittest.TestCase):
@@ -40,7 +41,7 @@ class BatchedRuntimeTest(unittest.TestCase):
         trainer = self.trainer(evaluation_backend="batched_cpp", evaluation_leaf_batch_size=4,
                                evaluation_reuse_tree=False)
         trainer.save_checkpoint(self.path)
-        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 6)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 7)
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.evaluation_workers, 2)
         self.assertEqual(restored.evaluation_backend, "batched_cpp")
@@ -59,6 +60,9 @@ class BatchedRuntimeTest(unittest.TestCase):
         self.trainer().save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 4
+        payload.pop("online_tactical_replay")
+        for key in loop._ONLINE_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload["progress"].pop("tactical_training_steps")
         payload["runtime"] = {"evaluation_workers": 12}
         torch.save(payload, self.path)
@@ -112,12 +116,15 @@ class BatchedRuntimeTest(unittest.TestCase):
         self.trainer().save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 5
+        payload.pop("online_tactical_replay")
+        for key in loop._ONLINE_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload["progress"].pop("tactical_training_steps")
         torch.save(payload, self.path)
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.tactical_training_steps, 0)
         restored.save_checkpoint(self.path)
-        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 6)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 7)
 
     def test_extra_updates_round_trip_without_inventing_games_or_promoting(self):
         trainer = self.trainer()

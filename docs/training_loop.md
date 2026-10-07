@@ -24,10 +24,13 @@
 
 1. 현재 기준 모델인 `champion`으로 지정한 수의 PUCT 자가 대국을 끝까지 진행한다.
 2. 착수 전 상태, 탐색 방문 비율, 최종 승패 목표를 FIFO 자료 버퍼에 넣는다.
-3. 버퍼에서 위치를 균등하게 복원추출하여 `learner`를 지정한 횟수만큼 갱신한다.
-4. 갱신한 후보와 `champion`이 같은 탐색 예산으로 흑백을 교대해 대국한다.
-5. 후보 승률이 승격 기준 이상이면 후보를 새로운 `champion`으로 채택한다.
-6. 완료한 반복의 모델, 버퍼, optimizer, 난수와 진행 횟수를 저장하고 지표를 기록한다.
+3. `online_tactics`를 켰으면 새 대국의 일부 위치를 깊게 읽고, 증명한 전술을
+   별도 FIFO 버퍼에 저장한다. 기본값은 꺼짐이다.
+4. 일반 replay에서 위치를 복원추출하여 `learner`를 지정한 횟수만큼 갱신한다.
+   온라인 전술 버퍼가 있으면 설정한 비율로 그 위치를 미니배치에 섞는다.
+5. 갱신한 후보와 `champion`이 같은 탐색 예산으로 흑백을 교대해 대국한다.
+6. 후보 승률이 승격 기준 이상이면 후보를 새로운 `champion`으로 채택한다.
+7. 완료한 반복의 모델, 두 버퍼, optimizer, 난수와 진행 횟수를 저장하고 지표를 기록한다.
 
 승격되지 않아도 `learner`와 Adam 상태는 다음 반복으로 이어진다.
 자가 대국에 사용하는 모델은 평가를 통과한 `champion`이다. 따라서 후보를
@@ -35,8 +38,8 @@
 
 CPU 자가 대국은 매 판, GPU 자가 대국은 매 배치 새로운 시드를 사용한다.
 기본적으로 루트 Dirichlet 잡음과
-방문 수에 따른 착수 샘플링을 사용한다. 정책 목표는 항상 실제 방문 비율이고,
-착수 샘플링 온도는 게임에서 선택하는 수에만 적용된다. 가치 목표는 저장한
+방문 수에 따른 착수 샘플링을 사용한다. 일반 replay의 정책 목표는 실제 방문
+비율이고, 착수 샘플링 온도는 게임에서 선택하는 수에만 적용된다. 가치 목표는 저장한
 착수 전 플레이어가 최종 승자이면 `+1`, 아니면 `-1`이다.
 
 GPU 경로는 한 번에 최대 `self_play_batch_size`판을 진행하며 배치의 모든
@@ -73,6 +76,10 @@ GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국�
 용량 등 학습 설정을 함께 지정하면 오류를 표시한다. `--initial-model`은
 기존 `save_model` 파일의 가중치로 **새 학습 실행**을 시작하는 옵션이다.
 `--resume`과 함께 사용할 수 없고 optimizer, 버퍼와 진행 횟수는 이어받지 않는다.
+허용된 학습 설정을 바꾸려면 `--resume --reconfigure`와 기존 학습 파일이 없는
+새 `--output`을 사용한다. `--prepare-only`를 더하면 실제 대국 전에 변경된
+전체 상태만 저장할 수 있다. 사이클당 판수·갱신 수·일반 replay 용량은 변경할
+수 없고, 이미 채운 온라인 전술 replay의 용량 변경도 거부한다.
 
 ## GPU 자가 대국과 학습 시작하기
 
@@ -219,6 +226,15 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--channels` / `--residual-blocks` | 32 / 2 | 새 모델의 구성 |
 | `--device` | `cpu` | PyTorch 추론과 학습 장치 |
 | `--threads` | 1 | CLI 실행의 PyTorch CPU 스레드 수 |
+| `--online-tactics` | 꺼짐 | 새 자가 대국의 일부 위치를 깊게 증명하고 미니배치에 혼합 |
+| `--online-tactics-max-cases` | 32 | 사이클당 확인할 CPU 전술 위치 상한 |
+| `--online-tactics-max-depth` | 9 | 양쪽 착수를 합친 증명 깊이(ply) |
+| `--online-tactics-max-nodes` | 2,000,000 | 위치당 증명 탐색 노드 상한 |
+| `--online-tactics-time-limit-ms` | 2,000 | 위치당 CPU 증명 시간 예산(ms) |
+| `--online-tactics-generation-seconds` | 30 | 사이클당 전술 자료 생성 시간 예산; 전체 사이클 상한은 아님 |
+| `--online-tactics-fraction` | 0.25 | 증명 버퍼가 있을 때 미니배치의 전술 표본 비율 |
+| `--online-tactics-replay-capacity` | 1,024 | 일반 replay와 분리된 증명 위치 FIFO 용량 |
+| `--online-tactics-min-proof-depth` | 3 | 채택할 승리 증명의 최소 수순 길이(ply) |
 
 같은 설정을 Python의 `TrainingConfig`에서도 지정할 수 있다.
 라이브러리를 가져오는 것만으로 CPU 스레드 설정을 바꾸지는 않는다.
@@ -240,11 +256,56 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 대국은 별도로 수행한다. 이전에 계산한 예상 시간은 이 프로그램의 전체 학습
 시간 실측치가 아니다. 지표의 자료 생성·학습·평가 시간을 각각 확인한다.
 
+## 온라인 장기 전술을 학습 루프에 연결하기
+
+`--online-tactics`는 매 사이클 생성한 대국에서 일부 비종료 위치를 뽑고,
+실제 착수 기록으로 재현하여 깊은 CPU 증명 탐색을 수행한다. 현재 플레이어의
+승리가 확정된 위치 중 최소 증명 길이 조건을 만족한 것만 별도 전술 FIFO에
+저장한다. 증명된 승리 수를 정책 목표로, `+1`을 가치 목표로 사용한다.
+`UNKNOWN`을 안전·패배·무승부 라벨로 바꾸지 않으며 `LOSS`도 임의의 정책
+정답으로 채택하지 않는다. 실제 대국에서 관찰한 승패 목표는 일반 replay에
+그대로 유지한다.
+
+일반 replay와 증명 replay는 분리되어 있으므로 전술 위치가 기존 전략 자료를
+밀어내지 않는다. 증명 버퍼가 있으면 기본적으로 미니배치의 25%를 전술에서,
+75%를 일반 replay에서 복원추출한다. 증명 위치가 아직 없으면 원래 미니배치로
+학습한다. 새 정답을 못 찾은 사이클도 이전 증명 자료를 계속 사용할 수 있다.
+설정한 `--train-steps` 안에서 혼합하므로 사이클당 Adam 갱신 수는 증가하지
+않는다. 전술 자료에는 회전·반사를 적용하기 전의 원본 증명도 함께 저장한다.
+
+이 기능은 자가 대국의 모든 수에 깊은 전술 탐색을 추가하지 않는다. 자가 대국의
+PUCT 예산, CUDA의 기존 얕은 검사, 평가 예산과 champion 승격 기준은 그대로다.
+새 긴 강제 승리 문제를 매 사이클 발견한다고 보장하지 않으며 추가 CPU 시간도
+필요하다. 자세한 안전 조건·옵션·실행 방법은
+[증명 기반 전술 학습](tactical_curriculum.md#매-사이클-새로운-전술을-계산하여-학습하기)에 있다.
+
+기존 v6 전술 보강 체크포인트에서 설정만 준비하는 예시다. 원본을 덮어쓰지 않는다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py `
+  --resume runs\tactics-candidate-2026-10-07\latest.pt `
+  --device cuda --reconfigure --prepare-only --online-tactics `
+  --output runs\tactics-online-2026-10-07
+```
+
+기본 teacher 예산은 위 설정 표에 나온 값이며 새 상태에 저장된다. 이후 아래처럼
+재개하면 온라인 전술 설정·전술 버퍼도 함께 복원한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py `
+  --resume runs\tactics-online-2026-10-07\latest.pt `
+  --device cuda --iterations 10 --output runs\tactics-online-2026-10-07
+```
+
+시작 옵션을 지정하지 않은 새 실행과 v1~v6의 일반 재개에서는 온라인 전술이
+꺼져 있다. 온라인 전술을 꺼도 저장된 증명 버퍼는 보존하며, 다시 켤 때 사용할
+수 있다. 끄거나 예산을 바꿀 때도 `--reconfigure`와 새 출력 폴더를 사용한다.
+
 ## 저장 파일과 재개 범위
 
 | 파일 | 내용 | 읽는 API |
 | --- | --- | --- |
-| `latest.pt` | learner와 champion, Adam, 버퍼, 설정, 진행 횟수, 난수 상태 | `Trainer.load_checkpoint` / `--resume` |
+| `latest.pt` | learner와 champion, Adam, 일반·증명 버퍼, 설정, 진행 횟수, 난수 상태 | `Trainer.load_checkpoint` / `--resume` |
 | `best.pt` | 현재 champion의 스키마·모델 구성·가중치 | 기존 `load_model` |
 | `metrics.jsonl` | 완료한 반복마다 한 줄의 JSON 지표 | 일반 JSON Lines 도구 |
 
@@ -256,9 +317,11 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 복원 API로 읽지 않는다. 전체 체크포인트는 `weights_only=True`로 읽고 입력
 스키마, 가중치·Adam·버퍼·진행 횟수·난수 상태의 일관성을 검증한다.
 
-현재 전체 체크포인트는 버전 6이다. 버전 1~5도 읽으며, 이전 파일에는 없는
-`tactical_training_steps`는 0으로 복원한다. 버전 6은 완료 사이클 외에 수행한
-증명 기반 전술 갱신을 별도 저장한다. 진행 횟수의 검증식은 다음과 같다.
+현재 전체 체크포인트는 버전 7이다. 버전 1~6도 읽는다. 버전 1~5 파일에 없는
+`tactical_training_steps`는 0으로, 버전 1~6에 없는 온라인 전술 설정·증명
+버퍼는 꺼짐·빈 버퍼로 복원한다. 버전 7은 `online_tactical_replay`에 증명
+자료·메타데이터를 별도로 저장하고 복원 시 검증한다. 버전 6에서 도입한 완료
+사이클 외 증명 기반 전술 갱신 카운터도 유지한다. 진행 횟수 검증식은 다음과 같다.
 
 ```text
 self_play_games = iteration × games_per_iteration
@@ -270,6 +333,9 @@ training_steps = iteration × train_steps_per_iteration + tactical_training_step
 늘리지 않는다. `Trainer.train_tactical_batch()`는 성공한 갱신에만 두 학습
 카운터를 늘리고, 실패한 부분 상태의 저장을 금지한다. 모델·optimizer·버퍼·
 전용 Generator는 이어받고 champion은 자동 교체하지 않는다.
+온라인 전술 혼합은 사이클 안의 기존 갱신을 사용하므로 별도 추가 갱신 카운터를
+늘리지 않는다. 이미 증명 자료가 있는 전술 replay의 용량 변경은 거부하고,
+온라인 기능을 끄는 경우에도 자료를 유지한다.
 
 전술 보강 후 저장한 `last_metrics`의 과거 평가 결과는 갱신한 learner의 새
 평가가 아니다. `tactical_finetuning_since_evaluation`로 이를 표시하며 실제
@@ -288,6 +354,9 @@ training_steps = iteration × train_steps_per_iteration + tactical_training_step
 초기화하며 완료 반복 경계에서 난수 흐름을 복원한다.
 전체 체크포인트에는 이 Generator와 Python·PyTorch CPU·CUDA 난수 상태를
 저장한다. 장치·PyTorch 버전 등을 바꾸면 부동소수점 연산 결과가 달라질 수 있다.
+온라인 증명 탐색의 wall-clock 제한이 걸린 위치는 CPU 부하에 따라 증명 성공
+여부가 달라질 수 있다. 같은 시드·저장 상태만으로 시간 제한 teacher의 비트
+단위 재현성까지 보장하지 않는다.
 
 ## 평가와 기록 해석
 
@@ -315,6 +384,13 @@ worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 �
 지표에는 완료 반복 수, 누적 자가 대국·가중치 갱신 수, 기준 모델 버전,
 이번에 만든 위치 수, 버퍼 크기, 평균 수순, 종료 사유, 세 손실, 흑백별 후보
 승수와 승격 여부, 자료 생성·학습·평가의 경과 시간이 들어간다.
+온라인 경로는 `online_tactics_seconds`와 중첩
+`online_tactics` 보고서도 기록한다. 이 보고서에는 후보·검사한 위치, 증명
+결과와 제외 사유, 새 채택 표본 수 `added_samples`, 증명 버퍼 크기 `replay_size`,
+혼합 갱신 수 `mixed_updates`, 미니배치별 `tactical_rows_per_batch`·
+`replay_rows_per_batch`, 실제 teacher 시간 `seconds`가 들어간다. CLI에도
+채택 수·버퍼·혼합 비율·시간을 출력한다. 증명 위치 채택 수가 곧 전체 기력
+향상이나 장기 전술 일반화 성능을 의미하지 않는다.
 `self_play_backend`와 `self_play_batch_size`는 실행 경로와 설정을 나타낸다.
 `self_play_games_per_second`는 이번 완료 판수를 자료 생성 시간으로 나눈 값,
 `iteration_games_per_second`는 같은 판수를 학습·평가까지의 전체 반복 시간으로
@@ -340,7 +416,8 @@ worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 �
 `checkpoint_written`은 실제 파일을 쓴 실행과 파일 없이 API만 실행한 경우를
 구분한다. 저장 시간은 저장이 끝난 뒤에만
 알 수 있으므로 같은 체크포인트 내부의 `last_metrics`에는 포함하지 않는다.
-`elapsed_seconds`는 이전과 같이 자가 대국·학습·평가 계산 시간이다.
+`elapsed_seconds`는 자가 대국·온라인 teacher·학습·평가를 포함한 반복 계산
+시간이다. 온라인 경로가 꺼져 있으면 teacher 계산은 없다.
 `elapsed_with_checkpoint_seconds`도 JSONL append와 callback의 `best.pt` export
 시간은 포함하지 않으므로 전체 체감 wall-clock과 동일하다고 간주하지 않는다.
 

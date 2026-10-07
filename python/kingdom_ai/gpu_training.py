@@ -38,7 +38,7 @@ def _visit_sampling_weights(visits, temperature):
 
 
 def _collect_chunk(searcher, state, temperature, generator, temperature_moves=None,
-                   final_temperature=0.0):
+                   final_temperature=0.0, record_history=False):
     batch = len(state)
     device = state.device
     features_history = torch.empty(
@@ -50,6 +50,8 @@ def _collect_chunk(searcher, state, temperature, generator, temperature_moves=No
     )
     policy_history = torch.empty_like(masks_history, dtype=torch.float32)
     actors_history = torch.empty((_MAX_PLIES, batch), dtype=torch.int32, device=device)
+    actions_history = (torch.empty((_MAX_PLIES, batch), dtype=torch.int32, device=device)
+                       if record_history else None)
     lengths = torch.zeros(batch, dtype=torch.int32, device=device)
     invalid_move = torch.zeros((), dtype=torch.bool, device=device)
     plies = 0
@@ -77,6 +79,8 @@ def _collect_chunk(searcher, state, temperature, generator, temperature_moves=No
             weights[:, -1] += (~alive).to(weights.dtype)
             sampled = torch.multinomial(weights, 1, generator=generator).flatten()
             actions = torch.where(alive, sampled, result.actions)
+        if actions_history is not None:
+            actions_history[step].copy_(actions)
         accepted = state.play(actions)
         invalid_move |= (alive & ~accepted).any()
         lengths += alive.to(lengths.dtype)
@@ -92,6 +96,7 @@ def _collect_chunk(searcher, state, temperature, generator, temperature_moves=No
     masks_cpu = masks_history[:plies].cpu()
     policy_cpu = policy_history[:plies].cpu()
     actors_cpu = actors_history[:plies].cpu()
+    actions_cpu = None if actions_history is None else actions_history[:plies].cpu()
     metadata = torch.stack((lengths, state.states[:, GPU_WINNER],
                             state.states[:, GPU_REASON]), dim=1).cpu().tolist()
     players = {1: engine.Cell.Black, 2: engine.Cell.White}
@@ -110,13 +115,16 @@ def _collect_chunk(searcher, state, temperature, generator, temperature_moves=No
                 features_cpu[step, lane], masks_cpu[step, lane], policy_cpu[step, lane],
                 1.0 if actor == winner else -1.0, actor,
             ))
-        games.append(GameData(samples, winner, reasons[reason_code]))
+        action_history = (None if actions_cpu is None else
+                          tuple(actions_cpu[:length, lane].tolist()))
+        games.append(GameData(samples, winner, reasons[reason_code], action_history))
     return games
 
 
 def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
                            batch_size=128, seed=42, device="cuda",
-                           temperature_moves=None, final_temperature=0.0) -> list[GameData]:
+                           temperature_moves=None, final_temperature=0.0,
+                           record_history=False) -> list[GameData]:
     """Generate ordered complete games with CUDA PUCT and CPU training samples.
 
     ``options.seed`` controls root noise, and ``seed`` controls visit sampling;
@@ -128,6 +136,9 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
     ``temperature_moves`` optionally switches to ``final_temperature`` after
     the given number of plies, independently for every complete game; ``None``
     keeps the original fixed temperature throughout each game.
+    When ``record_history=True``, the actual sampled actions are retained on
+    CUDA and copied to CPU once per completed chunk. Each returned history is
+    replayable from the default initial engine state.
     """
     if type(games) is not int or games < 0:
         raise ValueError("games must be a non-negative integer")
@@ -140,6 +151,8 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("Temperature must be finite and non-negative")
     _validate_temperature_schedule(temperature_moves, final_temperature)
+    if type(record_history) is not bool:
+        raise TypeError("record_history must be bool")
     if options is None:
         options = GpuPUCTOptions(seed=seed)
     if not isinstance(options, GpuPUCTOptions):
@@ -157,5 +170,6 @@ def collect_gpu_puct_games(model, games, *, options=None, temperature=1.0,
         for start in range(0, games, batch_size):
             state = GpuStateBatch.initial(min(batch_size, games - start), device=searcher.device)
             completed.extend(_collect_chunk(searcher, state, temperature, generator,
-                                             temperature_moves, final_temperature))
+                                             temperature_moves, final_temperature,
+                                             record_history))
     return completed

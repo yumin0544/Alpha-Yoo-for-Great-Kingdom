@@ -53,6 +53,18 @@ def main():
           f"최근 평균 {recent['mean_self_play_plies']:.2f}수")
     print(f"단계 비중: 자가대국 {phases['self_play']:.1%}, "
           f"학습 {phases['training']:.1%}, 평가 {phases['evaluation']:.1%}")
+    online = summary["online_tactics"]
+    if online["timing_covered_iterations"]:
+        print(f"온라인 전술 teacher: 계산 시간 비중 {phases['online_tactics']:.1%}, "
+              f"누적 {duration(summary['phase_seconds']['online_tactics'])} "
+              f"({online['timing_covered_iterations']}/{summary['rows']}개 반복 기록)")
+    if online["report_covered_iterations"]:
+        size_text = ("N/A" if online["latest_replay_size"] is None
+                     else str(online["latest_replay_size"]))
+        print(f"전술 혼합: 새 채택 {online['added_samples']}개, "
+              f"혼합 갱신 {online['mixed_updates']}회, "
+              f"전술 표본 추출 {online['tactical_training_draws']}회, "
+              f"최근 증명 버퍼 {size_text}개")
     detail = summary["self_play_detail"]
     if detail["covered_iterations"]:
         print(

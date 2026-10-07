@@ -23,6 +23,7 @@ from .gpu_training import collect_gpu_puct_games
 from .model import PolicyValueNet
 from .puct import PUCTOptions
 from .replay import ReplayBuffer
+from .proof_replay import CertifiedTacticalReplay
 from .training import collect_puct_game, train_step
 
 
@@ -52,12 +53,24 @@ class TrainingConfig:
     final_temperature: float = 0.0
     self_play_tactical_checks: bool = False
     self_play_fpu_reduction: float | None = None
+    online_tactics: bool = False
+    online_tactics_max_cases: int = 32
+    online_tactics_max_depth: int = 9
+    online_tactics_max_nodes: int = 2000000
+    online_tactics_time_limit_ms: int = 2000
+    online_tactics_generation_seconds: float = 30.0
+    online_tactics_fraction: float = 0.25
+    online_tactics_replay_capacity: int = 1024
+    online_tactics_min_proof_depth: int = 3
 
     def __post_init__(self):
         positive_ints = (
             "games_per_iteration", "simulations", "replay_capacity", "batch_size",
             "train_steps_per_iteration", "evaluation_games", "evaluation_simulations",
             "self_play_batch_size",
+            "online_tactics_max_cases", "online_tactics_max_depth", "online_tactics_max_nodes",
+            "online_tactics_time_limit_ms", "online_tactics_replay_capacity",
+            "online_tactics_min_proof_depth",
         )
         for name in positive_ints:
             value = getattr(self, name)
@@ -81,6 +94,23 @@ class TrainingConfig:
         if self.self_play_backend != "cuda" and (
                 self.self_play_tactical_checks or self.self_play_fpu_reduction is not None):
             raise ValueError("Training tactical checks and FPU require CUDA self-play")
+        if type(self.online_tactics) is not bool:
+            raise ValueError("online_tactics must be a bool")
+        if not self.online_tactics_min_proof_depth <= self.online_tactics_max_depth <= 256:
+            raise ValueError("Online tactics requires min_proof_depth <= max_depth <= 256")
+        if self.online_tactics_time_limit_ms > 2 ** 31 - 1:
+            raise ValueError("Online tactics time limit must fit the solver's signed 32-bit milliseconds")
+        if self.online_tactics_max_nodes > 2 ** 64 - 1:
+            raise ValueError("Online tactics node limit must fit the solver's unsigned 64-bit counter")
+        for name in ("online_tactics_generation_seconds", "online_tactics_fraction"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be a finite positive real")
+        if self.online_tactics_fraction >= 1:
+            raise ValueError("online_tactics_fraction must be strictly less than one")
+        if self.online_tactics and self.batch_size < 2:
+            raise ValueError("Online tactics needs batch_size >= 2 to retain ordinary replay rows")
         if self.evaluation_games < 2 or self.evaluation_games % 2:
             raise ValueError("evaluation_games must be even and at least two")
         if type(self.evaluation_opening_moves) is not int or self.evaluation_opening_moves < 0:
@@ -108,7 +138,11 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 6
+_CHECKPOINT_VERSION = 7
+_ONLINE_CONFIG_KEYS = {"online_tactics", "online_tactics_max_cases", "online_tactics_max_depth",
+                       "online_tactics_max_nodes", "online_tactics_time_limit_ms",
+                       "online_tactics_generation_seconds", "online_tactics_fraction",
+                       "online_tactics_replay_capacity", "online_tactics_min_proof_depth"}
 _GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
 _STRENGTH_CONFIG_KEYS = {
     "augment_symmetries", "temperature_moves", "final_temperature",
@@ -126,6 +160,7 @@ _CHECKPOINT_KEYS = {
     "optimizer", "replay", "progress", "generator_state", "rng", "runtime",
     "last_metrics",
 }
+_CHECKPOINT_KEYS_V7 = _CHECKPOINT_KEYS | {"online_tactical_replay"}
 _RUNTIME_KEYS_V4 = {"evaluation_workers"}
 _RUNTIME_KEYS = _RUNTIME_KEYS_V4 | {
     "evaluation_backend", "evaluation_leaf_batch_size", "evaluation_reuse_tree",
@@ -297,11 +332,20 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.learning_rate,
                                           weight_decay=config.weight_decay)
         self.replay = ReplayBuffer(config.replay_capacity)
+        self.online_tactical_replay = CertifiedTacticalReplay(config.online_tactics_replay_capacity)
         self.generator = torch.Generator(device="cpu").manual_seed(config.seed)
         self.iteration = self.self_play_games = self.training_steps = self.champion_version = 0
         self.tactical_training_steps = 0
         self._at_boundary = True
         self._last_metrics = None
+        if config.online_tactics:
+            self._require_online_solver()
+
+    @staticmethod
+    def _require_online_solver():
+        import my_board_engine as engine
+        if not hasattr(engine, "solve_tactics"):
+            raise RuntimeError("Online tactics requires the rebuilt solve_tactics binding")
 
     def _next_seed(self):
         return int(torch.randint(2 ** 63 - 1, (1,), generator=self.generator, device="cpu").item())
@@ -345,7 +389,14 @@ class Trainer:
             raise ValueError("Unknown training configuration field") from error
         if config.self_play_backend == "cuda" and self.device.type != "cuda":
             raise ValueError("CUDA self-play requires a CUDA Trainer device")
+        if config.online_tactics:
+            self._require_online_solver()
+        if (config.online_tactics_replay_capacity != self.online_tactical_replay.capacity
+                and len(self.online_tactical_replay)):
+            raise ValueError("Cannot resize a nonempty certified tactical replay")
         # Validation above completes before changing any owned state.
+        if config.online_tactics_replay_capacity != self.online_tactical_replay.capacity:
+            self.online_tactical_replay = CertifiedTacticalReplay(config.online_tactics_replay_capacity)
         self.config = config
         for group in self.optimizer.param_groups:
             group["lr"] = config.learning_rate
@@ -357,6 +408,8 @@ class Trainer:
             "temperature_moves": config.temperature_moves,
             "final_temperature": config.final_temperature,
         })
+        if config.online_tactics:
+            schedule_options["record_history"] = True
         if config.self_play_backend == "cuda":
             # Each chunk owns temporary GPU RNG streams seeded from the saved
             # CPU generator. No unsaved searcher survives an iteration boundary.
@@ -405,6 +458,11 @@ class Trainer:
         replay_store_seconds = 0.0
         pending_samples = []
         pending_games = 0
+        miner = None
+        if config.online_tactics:
+            from .online_tactics import TacticalPositionMiner
+            miner = TacticalPositionMiner(config.online_tactics_max_cases,
+                                          generator=self.generator, iteration=self.iteration + 1)
 
         def flush_replay():
             nonlocal replay_store_seconds, pending_games
@@ -417,6 +475,8 @@ class Trainer:
             pending_games = 0
 
         for data in self._collect_games():
+            if miner is not None:
+                miner.add_game(data, self.self_play_games + 1)
             pending_samples.extend(data.samples)
             pending_games += 1
             self.self_play_games += 1
@@ -435,11 +495,55 @@ class Trainer:
         self._synchronize()
         self_play_seconds = perf_counter() - started
         self_play_compute_seconds = max(0.0, self_play_seconds - replay_store_seconds)
+        online_report = {"enabled": config.online_tactics, "seconds": 0.0,
+                         "added_samples": 0, "excluded_shallow": 0,
+                         "replay_size": len(self.online_tactical_replay)}
+        if miner is not None:
+            import my_board_engine as engine
+            from .tactical_training import collect_certified_samples
+            tactical_started = perf_counter()
+            cases = miner.cases()
+            options = engine.TacticalSolverOptions(
+                max_depth=config.online_tactics_max_depth,
+                max_nodes=config.online_tactics_max_nodes,
+                time_limit_ms=config.online_tactics_time_limit_ms)
+            proved, generation = collect_certified_samples(
+                cases, options, max_cases=config.online_tactics_max_cases,
+                generation_seconds=config.online_tactics_generation_seconds,
+                bound_remaining_time=True)
+            eligible = [row for row in proved
+                        if row.proof["proof_depth"] >= config.online_tactics_min_proof_depth]
+            eligible_ids = {row.case_id for row in eligible}
+            for record in generation["records"]:
+                if record["training_label"] and record["id"] not in eligible_ids:
+                    record["training_label"] = False
+                    record["exclusion_reason"] = "proof_shorter_than_minimum_depth"
+            self.online_tactical_replay.extend(eligible)
+            online_report.update({**generation, "sampled_games": miner.sampled_games,
+                                  "candidate_count": miner.candidate_count,
+                                  "added_samples": len(eligible),
+                                  "excluded_shallow": len(proved) - len(eligible),
+                                  "replay_size": len(self.online_tactical_replay),
+                                  "seconds": perf_counter() - tactical_started,
+                                  "max_depth": config.online_tactics_max_depth,
+                                  "max_nodes": config.online_tactics_max_nodes,
+                                  "time_limit_ms": config.online_tactics_time_limit_ms,
+                                  "generation_budget_seconds": config.online_tactics_generation_seconds,
+                                  "min_proof_depth": config.online_tactics_min_proof_depth})
         training_started = perf_counter()
         loss_totals = dict.fromkeys(("loss", "policy_loss", "value_loss"), 0.0)
+        tactical_rows = (max(1, min(config.batch_size - 1,
+                                   round(config.batch_size * config.online_tactics_fraction)))
+                         if config.online_tactics and len(self.online_tactical_replay) else 0)
         for _ in range(config.train_steps_per_iteration):
-            batch = self.replay.sample(config.batch_size, generator=self.generator,
+            batch = self.replay.sample(config.batch_size - tactical_rows, generator=self.generator,
                                        device=self.device)
+            if tactical_rows:
+                from .training import TrainingBatch
+                teacher = self.online_tactical_replay.sample(
+                    tactical_rows, generator=self.generator, device=self.device)
+                batch = TrainingBatch(*(torch.cat((getattr(teacher, field), getattr(batch, field)), dim=0)
+                                        for field in ("features", "legal_mask", "policy", "value")))
             if config.augment_symmetries:
                 batch = augment_batch(batch, generator=self.generator)
             losses = train_step(self.model, self.optimizer, batch)
@@ -448,6 +552,9 @@ class Trainer:
             self.training_steps += 1
         self._synchronize()
         training_seconds = perf_counter() - training_started
+        online_report.update({"mixed_updates": config.train_steps_per_iteration if tactical_rows else 0,
+                              "tactical_rows_per_batch": tactical_rows,
+                              "replay_rows_per_batch": config.batch_size - tactical_rows})
         evaluation_started = perf_counter()
         evaluation_options = ({"tactical_checks": True} if config.self_play_tactical_checks else {})
         evaluation_diagnostics = {}
@@ -481,6 +588,8 @@ class Trainer:
             "iteration": self.iteration, "self_play_games": self.self_play_games,
             "training_steps": self.training_steps, "champion_version": self.champion_version,
             "tactical_training_steps": self.tactical_training_steps,
+            "online_tactics": online_report,
+            "online_tactics_seconds": online_report["seconds"],
             "generated_samples": samples, "replay_size": len(self.replay),
             "mean_self_play_plies": plies / config.games_per_iteration,
             "p95_self_play_plies": p95_plies,
@@ -534,6 +643,7 @@ class Trainer:
             raise RuntimeError("An incomplete iteration cannot be checkpointed; reload the last save")
         payload = {
             "checkpoint_version": _CHECKPOINT_VERSION, "schema": deepcopy(_SCHEMA),
+            "online_tactical_replay": self.online_tactical_replay.state_dict(),
             "config": asdict(self.config), "model_config": self.model.model_config,
             "model": _model_state(self.model), "champion": _model_state(self.champion),
             "optimizer": _cpu_copy(self.optimizer.state_dict()), "replay": self.replay.state_dict(),
@@ -566,9 +676,9 @@ class Trainer:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected training checkpoint fields")
         version = payload.get("checkpoint_version")
-        if type(version) is not int or version not in (1, 2, 3, 4, 5, _CHECKPOINT_VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, 5, 6, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
-        expected_keys = (_CHECKPOINT_KEYS if version >= 4
+        expected_keys = (_CHECKPOINT_KEYS_V7 if version >= 7 else _CHECKPOINT_KEYS if version >= 4
                          else _CHECKPOINT_KEYS - {"runtime"})
         if set(payload) != expected_keys:
             raise ValueError("Unexpected training checkpoint fields")
@@ -576,6 +686,8 @@ class Trainer:
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
         config_keys = {field.name for field in fields(TrainingConfig)}
+        if version < 7:
+            config_keys -= _ONLINE_CONFIG_KEYS
         if version < 3:
             config_keys -= _STRENGTH_CONFIG_KEYS
         if version == 1:
@@ -595,6 +707,10 @@ class Trainer:
         model = _restore_model(payload["model_config"], payload["model"])
         champion = _restore_model(payload["model_config"], payload["champion"])
         replay = ReplayBuffer.from_state_dict(payload["replay"])
+        teacher_replay = (CertifiedTacticalReplay.from_state_dict(payload["online_tactical_replay"])
+                          if version >= 7 else CertifiedTacticalReplay(config.online_tactics_replay_capacity))
+        if teacher_replay.capacity != config.online_tactics_replay_capacity:
+            raise ValueError("Certified replay capacity does not match the configuration")
         if (replay.capacity != config.replay_capacity
                 or (progress["iteration"] == 0 and len(replay) != 0)
                 or (progress["iteration"] > 0 and len(replay) == 0)):
@@ -653,6 +769,7 @@ class Trainer:
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay
+        trainer.online_tactical_replay = teacher_replay
         trainer.generator = private_generator
         if version < 6:
             progress = {**progress, "tactical_training_steps": 0}

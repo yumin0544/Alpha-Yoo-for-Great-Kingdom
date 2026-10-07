@@ -8,7 +8,9 @@ import torch
 import torch.nn.functional as F
 import my_board_engine as engine
 
-from .encoding import ACTION_SIZE, BOARD_SIZE, INPUT_CHANNELS, encode_state, visit_policy
+from .encoding import (
+    ACTION_SIZE, BOARD_SIZE, INPUT_CHANNELS, encode_state, move_to_action, visit_policy,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class GameData:
     samples: list[TrainingSample]
     winner: engine.Cell
     reason: engine.EndReason
+    action_history: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,13 +78,18 @@ def _validate_temperature_schedule(temperature_moves, final_temperature):
 
 
 def collect_puct_game(model, options=None, temperature=1.0, seed=42, *,
-                      temperature_moves=None, final_temperature=0.0) -> GameData:
+                      temperature_moves=None, final_temperature=0.0,
+                      record_history=False) -> GameData:
     """Play both sides with neural PUCT and label PRE-MOVE player outcomes.
 
     With ``temperature_moves=None`` the original temperature applies throughout
     the game. Otherwise only the first ``temperature_moves`` plies use it, and
     subsequent moves use ``final_temperature``. Policy targets remain the raw
     root visit proportions at either temperature.
+
+    ``record_history=True`` retains the actual selected actions, not policy
+    argmaxes, so that the complete game can be replayed from the default initial
+    state without inferring permanent house ownership from a board snapshot.
     """
     from .puct import PUCT, PUCTOptions, sample_visits
     if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2 ** 64:
@@ -91,12 +99,15 @@ def collect_puct_game(model, options=None, temperature=1.0, seed=42, *,
     if not math.isfinite(temperature) or temperature < 0:
         raise ValueError("Temperature must be finite and non-negative")
     _validate_temperature_schedule(temperature_moves, final_temperature)
+    if type(record_history) is not bool:
+        raise TypeError("record_history must be bool")
     if options is None:
         options = PUCTOptions(seed=seed, dirichlet_epsilon=0.25)
     searcher = PUCT(model, options)
     generator = torch.Generator(device="cpu").manual_seed(seed)
     game = engine.State()
     positions = []
+    actions = [] if record_history else None
     while not game.result.finished():
         encoded = encode_state(game)
         search = searcher.search(game)
@@ -107,6 +118,8 @@ def collect_puct_game(model, options=None, temperature=1.0, seed=42, *,
         positions.append((encoded, policy))
         if not game.play(move).accepted():
             raise RuntimeError("PUCT failed to produce an accepted game move")
+        if actions is not None:
+            actions.append(move_to_action(move))
         if len(positions) > 2 * engine.CELL_COUNT + 2:
             raise RuntimeError("Game exceeded its finite move bound")
     winner = game.result.winner
@@ -114,7 +127,8 @@ def collect_puct_game(model, options=None, temperature=1.0, seed=42, *,
         encoded.features, encoded.legal_mask, policy,
         1.0 if encoded.to_play == winner else -1.0, encoded.to_play,
     ) for encoded, policy in positions]
-    return GameData(samples, winner, game.result.reason)
+    return GameData(samples, winner, game.result.reason,
+                    None if actions is None else tuple(actions))
 
 
 def make_batch(samples: Sequence[TrainingSample], device="cpu") -> TrainingBatch:
