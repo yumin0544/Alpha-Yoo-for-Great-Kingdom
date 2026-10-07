@@ -108,7 +108,7 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 5
+_CHECKPOINT_VERSION = 6
 _GPU_CONFIG_KEYS = {"self_play_backend", "self_play_batch_size"}
 _STRENGTH_CONFIG_KEYS = {
     "augment_symmetries", "temperature_moves", "final_temperature",
@@ -130,7 +130,8 @@ _RUNTIME_KEYS_V4 = {"evaluation_workers"}
 _RUNTIME_KEYS = _RUNTIME_KEYS_V4 | {
     "evaluation_backend", "evaluation_leaf_batch_size", "evaluation_reuse_tree",
 }
-_PROGRESS_KEYS = {"iteration", "self_play_games", "training_steps", "champion_version"}
+_PROGRESS_KEYS_V5 = {"iteration", "self_play_games", "training_steps", "champion_version"}
+_PROGRESS_KEYS = _PROGRESS_KEYS_V5 | {"tactical_training_steps"}
 
 
 def _cpu_copy(value):
@@ -298,11 +299,32 @@ class Trainer:
         self.replay = ReplayBuffer(config.replay_capacity)
         self.generator = torch.Generator(device="cpu").manual_seed(config.seed)
         self.iteration = self.self_play_games = self.training_steps = self.champion_version = 0
+        self.tactical_training_steps = 0
         self._at_boundary = True
         self._last_metrics = None
 
     def _next_seed(self):
         return int(torch.randint(2 ** 63 - 1, (1,), generator=self.generator, device="cpu").item())
+
+    def train_tactical_batch(self, batch):
+        """Apply one extra teacher update without inventing a self-play cycle.
+
+        The caller supplies engine-proved targets and, optionally, replay rows.
+        A failed update cannot be saved; reload the last boundary checkpoint.
+        The champion and historical iteration evaluation are not refreshed here.
+        """
+        if not self._at_boundary:
+            raise RuntimeError("Cannot train tactics during an incomplete iteration")
+        self._at_boundary = False
+        losses = train_step(self.model, self.optimizer, batch)
+        self.training_steps += 1
+        self.tactical_training_steps += 1
+        if self._last_metrics is not None:
+            self._last_metrics["training_steps"] = self.training_steps
+            self._last_metrics["tactical_training_steps"] = self.tactical_training_steps
+            self._last_metrics["tactical_finetuning_since_evaluation"] = True
+        self._at_boundary = True
+        return losses
 
     def reconfigure(self, **overrides):
         """Change learning/search settings at a saved boundary without resetting state.
@@ -458,6 +480,7 @@ class Trainer:
             "metrics_schema_version": 2,
             "iteration": self.iteration, "self_play_games": self.self_play_games,
             "training_steps": self.training_steps, "champion_version": self.champion_version,
+            "tactical_training_steps": self.tactical_training_steps,
             "generated_samples": samples, "replay_size": len(self.replay),
             "mean_self_play_plies": plies / config.games_per_iteration,
             "p95_self_play_plies": p95_plies,
@@ -543,7 +566,7 @@ class Trainer:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected training checkpoint fields")
         version = payload.get("checkpoint_version")
-        if type(version) is not int or version not in (1, 2, 3, 4, _CHECKPOINT_VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, 5, _CHECKPOINT_VERSION):
             raise ValueError("Unsupported training checkpoint version")
         expected_keys = (_CHECKPOINT_KEYS if version >= 4
                          else _CHECKPOINT_KEYS - {"runtime"})
@@ -561,10 +584,12 @@ class Trainer:
             raise ValueError("Invalid checkpoint training configuration")
         config = TrainingConfig(**raw_config)
         progress = payload["progress"]
-        if (not isinstance(progress, dict) or set(progress) != _PROGRESS_KEYS
+        expected_progress = _PROGRESS_KEYS if version >= 6 else _PROGRESS_KEYS_V5
+        if (not isinstance(progress, dict) or set(progress) != expected_progress
                 or any(type(value) is not int or value < 0 for value in progress.values())
                 or progress["self_play_games"] != progress["iteration"] * config.games_per_iteration
-                or progress["training_steps"] != progress["iteration"] * config.train_steps_per_iteration
+                or progress["training_steps"] != (progress["iteration"] * config.train_steps_per_iteration
+                                                   + progress.get("tactical_training_steps", 0))
                 or progress["champion_version"] > progress["iteration"]):
             raise ValueError("Checkpoint progress counters are inconsistent")
         model = _restore_model(payload["model_config"], payload["model"])
@@ -629,6 +654,10 @@ class Trainer:
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay
         trainer.generator = private_generator
+        if version < 6:
+            progress = {**progress, "tactical_training_steps": 0}
+            if last_metrics is not None:
+                last_metrics = {**last_metrics, "tactical_training_steps": 0}
         for name, value in progress.items():
             setattr(trainer, name, value)
         trainer._last_metrics = deepcopy(last_metrics)

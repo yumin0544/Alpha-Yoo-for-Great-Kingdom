@@ -92,7 +92,7 @@ CUDA용 PyTorch와 호환 드라이버가 설치된 환경에서 자가 대국 �
 
 중단 후에는 CUDA 장치를 다시 지정하고, 자가 대국 경로와 배치 크기는
 체크포인트에서 복원한다. 평가 worker는 버전 4 이상에서, backend·leaf 배치·트리
-재사용 여부는 버전 5에서 복원된다. 이전 형식은 `legacy` 평가로 복원한다.
+재사용 여부는 버전 5 이상에서 복원된다. 이전 형식은 `legacy` 평가로 복원한다.
 
 ```powershell
 .\.venv\Scripts\python.exe examples\train.py --device cuda --resume runs\gpu-rl\latest.pt --iterations 1 --output runs\gpu-rl
@@ -255,6 +255,27 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 `latest.pt`는 모델 가중치만 저장하던 파일과 형식이 다르다. 두 종류는 서로의
 복원 API로 읽지 않는다. 전체 체크포인트는 `weights_only=True`로 읽고 입력
 스키마, 가중치·Adam·버퍼·진행 횟수·난수 상태의 일관성을 검증한다.
+
+현재 전체 체크포인트는 버전 6이다. 버전 1~5도 읽으며, 이전 파일에는 없는
+`tactical_training_steps`는 0으로 복원한다. 버전 6은 완료 사이클 외에 수행한
+증명 기반 전술 갱신을 별도 저장한다. 진행 횟수의 검증식은 다음과 같다.
+
+```text
+self_play_games = iteration × games_per_iteration
+training_steps = iteration × train_steps_per_iteration + tactical_training_steps
+```
+
+`training_steps`는 실제 전체 Adam 갱신 수이고 `tactical_training_steps`는 그중
+추가 전술 갱신 수다. 전술 보강으로 자가 대국 판수·완료 사이클·champion 버전을
+늘리지 않는다. `Trainer.train_tactical_batch()`는 성공한 갱신에만 두 학습
+카운터를 늘리고, 실패한 부분 상태의 저장을 금지한다. 모델·optimizer·버퍼·
+전용 Generator는 이어받고 champion은 자동 교체하지 않는다.
+
+전술 보강 후 저장한 `last_metrics`의 과거 평가 결과는 갱신한 learner의 새
+평가가 아니다. `tactical_finetuning_since_evaluation`로 이를 표시하며 실제
+학습 전후 전술 지표는 별도 `tactical_report.json`에 기록한다. 버전 6의 전술
+보강 출력은 기존 전체 체크포인트 재개 API로 읽을 수 있다. 명령과 정답 생성의
+안전 조건은 [증명 기반 전술 학습](tactical_curriculum.md)에 설명한다.
 
 체크포인트는 임시 파일을 쓴 뒤 교체하며, 반복 시작 전과 완료 후에 저장한다.
 `Ctrl+C`로 중단하거나 반복 도중 오류가 발생하면 **마지막으로 완료한 반복**의

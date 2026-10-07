@@ -11,7 +11,10 @@ from kingdom_ai import (
     GpuPUCT, GpuPUCTOptions, GpuStateBatch, PUCT, PUCTOptions,
     action_to_move, load_model,
 )
-from kingdom_ai.tactics import analyze_tactics, select_tactical_move
+from kingdom_ai.tactics import (
+    analyze_tactics, select_tactical_move, analyze_deep_tactics,
+    select_deep_tactical_move, select_deep_tactical_action,
+)
 
 
 HELP = (
@@ -35,6 +38,13 @@ def positive_integer(value):
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("1 이상의 정수가 필요합니다.")
+    return number
+
+
+def nonnegative_integer(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("0 이상의 정수가 필요합니다.")
     return number
 
 
@@ -77,11 +87,25 @@ def print_board(game):
 
 class Opponent:
     def __init__(self, model, device, simulations, seed, *, tactical_checks=True,
-                 fpu_reduction=0.0):
+                 fpu_reduction=0.0, tactical_depth=0, tactical_node_budget=20000,
+                 tactical_time_ms=250):
         self.device = torch.device(device)
         if type(tactical_checks) is not bool:
             raise TypeError("tactical_checks must be a bool")
         self.tactical_checks = tactical_checks
+        for name, value, minimum in (("tactical_depth", tactical_depth, 0),
+                                     ("tactical_node_budget", tactical_node_budget, 1),
+                                     ("tactical_time_ms", tactical_time_ms, 0)):
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if tactical_depth > 256:
+            raise ValueError("tactical_depth must not exceed 256 plies")
+        self.tactical_depth = tactical_depth
+        self.tactical_node_budget = tactical_node_budget
+        self.tactical_time_ms = tactical_time_ms
+        self.last_deep_tactics = None
+        if tactical_depth and not hasattr(engine, "solve_tactics"):
+            raise RuntimeError("깊은 전술 탐색을 사용하려면 최신 엔진 바인딩을 빌드·설치해 주세요.")
         if self.device.type == "cuda":
             self.searcher = GpuPUCT(model, GpuPUCTOptions(
                 simulations=simulations, seed=seed, dirichlet_epsilon=0.0,
@@ -95,14 +119,28 @@ class Opponent:
             raise ValueError("대국 장치는 cpu 또는 cuda여야 합니다.")
 
     def choose(self, game):
+        deep = (analyze_deep_tactics(game, max_depth=self.tactical_depth,
+                                    max_nodes=self.tactical_node_budget,
+                                    time_limit_ms=self.tactical_time_ms)
+                if self.tactical_depth else None)
+        self.last_deep_tactics = deep
+        if deep is not None and deep.winning_actions:
+            return action_to_move(min(deep.winning_actions))
         if self.device.type == "cuda":
             result = self.searcher.search(GpuStateBatch.from_engine([game], device=self.device))
-            return action_to_move(int(result.actions[0].item()))
+            if deep is None:
+                return action_to_move(int(result.actions[0].item()))
+            immediate = analyze_tactics(game) if self.tactical_checks else None
+            return action_to_move(select_deep_tactical_action(
+                result, deep, immediate_choices=immediate))
         choices = analyze_tactics(game) if self.tactical_checks else None
         if choices is not None and choices.winning_actions:
             return action_to_move(min(choices.winning_actions))
         result = self.searcher.search(game)
-        move = select_tactical_move(result, choices) if choices is not None else result.best_move
+        if deep is not None:
+            move = select_deep_tactical_move(result, deep, immediate_choices=choices)
+        else:
+            move = select_tactical_move(result, choices) if choices is not None else result.best_move
         if move is None:
             raise RuntimeError("진행 중인 대국에서 AI가 수를 반환하지 않았습니다.")
         return move
@@ -161,7 +199,7 @@ def play(opponent, human):
 def main():
     parser = argparse.ArgumentParser(description="저장한 학습 모델과 사람 대 AI 대국")
     parser.add_argument("--checkpoint", type=Path, required=True,
-                        help="대국용 기준 모델 best.pt (학습 재개 파일 latest.pt와 다릅니다)")
+                        help="추론용 best.pt 또는 candidate.pt (학습 재개 latest.pt와 다릅니다)")
     parser.add_argument("--human", choices=("black", "white"), default="black",
                         help="사람의 색: black 선공, white 후공 (기본 black)")
     parser.add_argument("--device", default="cpu", help="cpu 또는 cuda, cuda:0 (기본 cpu)")
@@ -171,6 +209,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tactical-checks", action=argparse.BooleanOptionalAction, default=True,
                         help="즉시 승리와 상대의 다음 한 수 승리를 검사 (기본 켬)")
+    parser.add_argument("--tactical-depth", type=nonnegative_integer, default=0,
+                        help="C++ 깊은 전술 탐색: 양쪽 합계 최대 수(패스 포함), 0이면 끔; 미확정은 안전 증명이 아님")
+    parser.add_argument("--tactical-node-budget", type=positive_integer, default=20000,
+                        help="깊은 전술 탐색의 한 수당 최대 노드 수 (기본 20000)")
+    parser.add_argument("--tactical-time-ms", type=nonnegative_integer, default=250,
+                        help="깊은 전술 탐색의 한 수당 시간 예산 ms, 0이면 시간 제한 없이 노드 예산 적용")
     parser.add_argument("--fpu-reduction", type=float, default=0.0,
                         help="GPU 미방문 수의 초기 평가 감소량 (기본 0.0)")
     args = parser.parse_args()
@@ -181,10 +225,16 @@ def main():
         model = load_model(args.checkpoint, device="cpu")
         opponent = Opponent(model, args.device, args.simulations, args.seed,
                             tactical_checks=args.tactical_checks,
-                            fpu_reduction=args.fpu_reduction)
+                            fpu_reduction=args.fpu_reduction,
+                            tactical_depth=args.tactical_depth,
+                            tactical_node_budget=args.tactical_node_budget,
+                            tactical_time_ms=args.tactical_time_ms)
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(f"모델을 읽거나 대국을 준비하지 못했습니다: {error}")
     print(f"대국 모델: {args.checkpoint.resolve()}")
+    if args.tactical_depth:
+        print(f"깊은 전술 탐색: 양쪽 합계 {args.tactical_depth}수 · 최대 {args.tactical_node_budget}노드 · "
+              f"{args.tactical_time_ms}ms (미확정은 안전 증명이 아닙니다)")
     human = engine.Cell.Black if args.human == "black" else engine.Cell.White
     try:
         return play(opponent, human)

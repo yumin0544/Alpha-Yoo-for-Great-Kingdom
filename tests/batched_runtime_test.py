@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -39,7 +40,7 @@ class BatchedRuntimeTest(unittest.TestCase):
         trainer = self.trainer(evaluation_backend="batched_cpp", evaluation_leaf_batch_size=4,
                                evaluation_reuse_tree=False)
         trainer.save_checkpoint(self.path)
-        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 5)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 6)
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.evaluation_workers, 2)
         self.assertEqual(restored.evaluation_backend, "batched_cpp")
@@ -58,6 +59,7 @@ class BatchedRuntimeTest(unittest.TestCase):
         self.trainer().save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 4
+        payload["progress"].pop("tactical_training_steps")
         payload["runtime"] = {"evaluation_workers": 12}
         torch.save(payload, self.path)
         restored = Trainer.load_checkpoint(self.path)
@@ -105,6 +107,46 @@ class BatchedRuntimeTest(unittest.TestCase):
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.iteration, trainer.iteration)
         self.assertEqual(restored._last_metrics, metrics)
+
+    def test_version_five_defaults_extra_updates_to_zero(self):
+        self.trainer().save_checkpoint(self.path)
+        payload = torch.load(self.path, weights_only=True)
+        payload["checkpoint_version"] = 5
+        payload["progress"].pop("tactical_training_steps")
+        torch.save(payload, self.path)
+        restored = Trainer.load_checkpoint(self.path)
+        self.assertEqual(restored.tactical_training_steps, 0)
+        restored.save_checkpoint(self.path)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 6)
+
+    def test_extra_updates_round_trip_without_inventing_games_or_promoting(self):
+        trainer = self.trainer()
+        trainer.run_iteration()
+        champion = deepcopy(trainer.champion.state_dict())
+        batch = trainer.replay.sample(2, generator=trainer.generator)
+        trainer.train_tactical_batch(batch)
+        self.assertEqual((trainer.iteration, trainer.self_play_games,
+                          trainer.training_steps, trainer.tactical_training_steps), (1, 2, 2, 1))
+        self.assertTrue(trainer._last_metrics["tactical_finetuning_since_evaluation"])
+        for name, value in champion.items():
+            self.assertTrue(torch.equal(value, trainer.champion.state_dict()[name]))
+        trainer.save_checkpoint(self.path)
+        restored = Trainer.load_checkpoint(self.path)
+        self.assertEqual(restored.tactical_training_steps, 1)
+        self.assertEqual(restored.training_steps, 2)
+        restored.run_iteration()
+        self.assertEqual(restored.training_steps, 3)
+        self.assertEqual(restored.tactical_training_steps, 1)
+        self.assertEqual(restored.iteration, 2)
+
+    def test_failed_extra_update_cannot_be_saved(self):
+        trainer = self.trainer()
+        with patch("kingdom_ai.loop.train_step", side_effect=RuntimeError("failed")):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                trainer.train_tactical_batch(None)
+        self.assertEqual(trainer.training_steps, 0)
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            trainer.save_checkpoint(self.path)
 
 
 if __name__ == "__main__":

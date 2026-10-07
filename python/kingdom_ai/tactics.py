@@ -1,11 +1,13 @@
-"""One-move tactical checks against the verified C++ state transitions.
+"""Immediate checks and opt-in bounded proof search using verified C++ rules.
 
 These checks narrow root choices without changing the game's legal moves. They
 take immediate wins and avoid immediate losses when a safe alternative exists;
-they do not claim to solve threats that require more than one opposing move.
+The immediate checker does not solve deeper threats. The separate deep checker
+accepts only C++ solver certificates, while cut-off branches remain UNKNOWN.
 """
 
 from dataclasses import dataclass
+import math
 
 import my_board_engine as engine
 
@@ -119,3 +121,138 @@ def select_tactical_move(result, choices: TacticalChoices) -> engine.Move:
         item.visits, item.value, -move_to_action(item.move)
     ))
     return best.move
+
+
+@dataclass(frozen=True)
+class DeepTacticalChoices:
+    """Depth/budget-limited proof sets, never a claim that UNKNOWN is safe.
+
+    A ply is one actual placement or pass by either player. Proofs concern the
+    exact Kingdom terminal winner, not ordinary Go life/death or territory value.
+    A winning search can stop at one proved winning action; other winning actions
+    may consequently remain unknown.
+    """
+
+    legal_actions: frozenset[int]
+    winning_actions: frozenset[int]
+    losing_actions: frozenset[int]
+    unknown_actions: frozenset[int]
+    outcome: object
+    nodes: int
+    proof_depth: int
+    completed_depth: int
+    elapsed_ms: float
+    budget_exhausted: bool
+    principal_variation: tuple[engine.Move, ...]
+
+    @property
+    def preferred_actions(self) -> frozenset[int]:
+        # When every root action is proved losing, retain the ordinary search
+        # fallback instead of pretending that there is a safe legal alternative.
+        return self.winning_actions or self.unknown_actions or self.legal_actions
+
+
+def analyze_deep_tactics(state: engine.State, *, max_depth=12, max_nodes=20000,
+                         time_limit_ms=250) -> DeepTacticalChoices:
+    """Ask the bounded C++ solver for certified root action classifications.
+
+    Incomplete/depth-cut branches remain UNKNOWN; no policy/value label or pruning
+    proof is inferred from a promising principal variation. ``time_limit_ms=0``
+    disables the timer, but the positive node budget still bounds the search.
+    """
+    if not isinstance(state, engine.State):
+        raise TypeError("Expected an engine State")
+    for name, value, minimum in (("max_depth", max_depth, 1), ("max_nodes", max_nodes, 1),
+                                 ("time_limit_ms", time_limit_ms, 0)):
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+    if max_depth > 256:
+        raise ValueError("max_depth must not exceed the engine limit of 256 plies")
+    if not hasattr(engine, "solve_tactics") or not hasattr(engine, "TacticalSolverOptions"):
+        raise RuntimeError("The installed engine binding lacks solve_tactics; rebuild/install this project")
+    snapshot = state.copy()
+    _check_rules(snapshot)
+    legal = frozenset(move_to_action(move) for move in snapshot.legal_moves())
+    result = engine.solve_tactics(snapshot, engine.TacticalSolverOptions(
+        max_depth=max_depth, max_nodes=max_nodes, time_limit_ms=time_limit_ms))
+
+    def action_set(moves, name):
+        actions = [move_to_action(move) for move in moves]
+        if len(set(actions)) != len(actions) or not set(actions) <= legal:
+            raise RuntimeError(f"Solver returned invalid {name}")
+        return frozenset(actions)
+
+    winning = action_set(result.winning_moves, "winning moves")
+    losing = action_set(result.losing_moves, "losing moves")
+    unknown = action_set(result.unknown_moves, "unknown moves")
+    if (winning & losing or winning & unknown or losing & unknown
+            or winning | losing | unknown != legal):
+        raise RuntimeError("Solver action classes must partition all legal root moves")
+    if (result.nodes < 0 or result.proof_depth < 0 or result.completed_depth < 0
+            or not math.isfinite(result.elapsed_ms) or result.elapsed_ms < 0):
+        raise RuntimeError("Solver returned invalid proof metadata")
+    return DeepTacticalChoices(legal, winning, losing, unknown, result.outcome,
+                               result.nodes, result.proof_depth, result.completed_depth,
+                               result.elapsed_ms, result.budget_exhausted,
+                               tuple(result.principal_variation))
+
+
+def _deep_preferred_actions(choices, immediate_choices):
+    if not isinstance(choices, DeepTacticalChoices):
+        raise TypeError("Expected DeepTacticalChoices")
+    if immediate_choices is None:
+        return choices.preferred_actions
+    if not isinstance(immediate_choices, TacticalChoices):
+        raise TypeError("Expected TacticalChoices for immediate_choices")
+    if immediate_choices.legal_actions != choices.legal_actions:
+        raise ValueError("Immediate and deep choices must describe the same legal root actions")
+    winning = choices.winning_actions | immediate_choices.winning_actions
+    losing = choices.losing_actions | (choices.legal_actions - immediate_choices.safe_actions)
+    if winning & losing:
+        raise RuntimeError("Immediate and deep tactical proofs contradict one another")
+    return winning or (choices.legal_actions - losing) or choices.legal_actions
+
+
+def select_deep_tactical_move(result, choices: DeepTacticalChoices, *,
+                              immediate_choices=None) -> engine.Move:
+    """CPU PUCT selection excluding proved losses, with an honest losing fallback."""
+    allowed = _deep_preferred_actions(choices, immediate_choices)
+    if result.best_move is None or not allowed:
+        raise ValueError("A terminal or unsearched state has no move to select")
+    if move_to_action(result.best_move) in allowed:
+        return result.best_move
+    candidates = [item for item in result.moves if move_to_action(item.move) in allowed]
+    if not candidates:
+        raise ValueError("Search statistics do not contain the preferred legal actions")
+    best = max(candidates, key=lambda item: (
+        item.visits, item.value, -move_to_action(item.move)))
+    return best.move
+
+
+def select_deep_tactical_action(result, choices: DeepTacticalChoices, *, lane=0,
+                                immediate_choices=None) -> int:
+    """CUDA result selection using its real [N,82] visits/priors fields.
+
+    ``GpuSearchResult.values`` has shape [N] (root values), not per-action values.
+    It must not be indexed or broadcast as an edge-value tiebreaker.
+    """
+    allowed = _deep_preferred_actions(choices, immediate_choices)
+    if type(lane) is not int or lane < 0:
+        raise ValueError("lane must be a non-negative integer")
+    if (result.visits.ndim != 2 or result.visits.shape[1] != BOARD_SIZE ** 2 + 1
+            or result.priors.shape != result.visits.shape
+            or result.actions.ndim != 1 or result.actions.shape[0] != result.visits.shape[0]
+            or lane >= result.visits.shape[0]):
+        raise ValueError("Invalid GPU root statistics shapes")
+    if not allowed:
+        raise ValueError("A terminal state has no move to select")
+    original = int(result.actions[lane].item())
+    if original in allowed:
+        return original
+    visits = result.visits[lane].detach().cpu().tolist()
+    priors = result.priors[lane].detach().cpu().tolist()
+    if any(value < 0 or int(value) != value for value in visits):
+        raise ValueError("GPU root visits must be non-negative integers")
+    if any(not math.isfinite(value) or value < 0 for value in priors):
+        raise ValueError("GPU root priors must be finite and non-negative")
+    return max(allowed, key=lambda action: (visits[action], priors[action], -action))

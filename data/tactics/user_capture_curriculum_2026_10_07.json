@@ -1,0 +1,1590 @@
+{
+  "format_version": 1,
+  "notes": "One complete game family; keep together in training/held-out splits. Every position replays original history and checks the recorded board, permanent ownership, stock, score and current player. A separate solver must prove training labels.",
+  "positions": [
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_14",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          ".........",
+          "....#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 34,
+          "black": 34
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_15",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "....x....",
+          "....#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 34,
+          "black": 33
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_16",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "....xo...",
+          "....#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 33,
+          "black": 33
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_17",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "...xxo...",
+          "....#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 33,
+          "black": 32
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_18",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          "....#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 32,
+          "black": 32
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_19",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          "...x#....",
+          ".........",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 32,
+          "black": 31
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_20",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          "...x#....",
+          "...o.....",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 31,
+          "black": 31
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_21",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            5,
+            3
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          "..xx#....",
+          "...o.....",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 31,
+          "black": 30
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_22",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            2
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          ".oxx#....",
+          "...o.....",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 30,
+          "black": 30
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_23",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            6,
+            3
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          ".oxx#....",
+          "..xo.....",
+          ".o.....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 30,
+          "black": 29
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_24",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            7,
+            3
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".x.oxo...",
+          "..oxxo...",
+          ".oxx#....",
+          "..xo.....",
+          ".oo....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "black",
+        "remaining_stones": {
+          "white": 29,
+          "black": 29
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    },
+    {
+      "format_version": 1,
+      "id": "user_game_2_after_ply_25",
+      "family_id": "user_capture_2026_10_07_game_2",
+      "motif": "ladder_chase",
+      "source": {
+        "attachment_sha256": "2a0115da93dd14bfeb46713acb0d51a652acd41c6fd66c86fbb33611384fe02e",
+        "kind": "user_console_record",
+        "game": 2
+      },
+      "notes": "Recorded moves are observations, not assumed best-play policy labels.",
+      "position": {
+        "neutral": [
+          5,
+          5
+        ],
+        "history": [
+          [
+            3,
+            2
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            6
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            6
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            4,
+            4
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            4
+          ],
+          [
+            6,
+            4
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            7,
+            3
+          ],
+          [
+            3,
+            3
+          ]
+        ]
+      },
+      "expected": {
+        "board": [
+          "..xo.x...",
+          "..xooxx..",
+          ".xxoxo...",
+          "..oxxo...",
+          ".oxx#....",
+          "..xo.....",
+          ".oo....o.",
+          ".........",
+          "........."
+        ],
+        "ownership": [
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          ".........",
+          "........."
+        ],
+        "to_play": "white",
+        "remaining_stones": {
+          "white": 29,
+          "black": 28
+        },
+        "consecutive_passes": 0,
+        "score": {
+          "white": 0,
+          "black": 0
+        }
+      }
+    }
+  ]
+}

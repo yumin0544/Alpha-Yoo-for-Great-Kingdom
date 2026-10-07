@@ -17,7 +17,7 @@ minimum-version = "0.11"
 cmake.build-type = "Release"
 build.targets = ["my_board_engine"]
 wheel.packages = ["python/kingdom_ai"]
-sdist.include = ["bindings/**", "engine/**", "mcts/**", "python/**", "examples/**", "tests/**", "docs/**", "CMakeLists.txt"]
+sdist.include = ["bindings/**", "engine/**", "mcts/**", "python/**", "examples/**", "tests/**", "docs/**", "data/tactics/**", "CMakeLists.txt"]
 sdist.exclude = [".venv/**", "build*/**", "cmake-build-*/**", "dist/**"]
 
 [tool.scikit-build.cmake.define]
