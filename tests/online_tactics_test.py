@@ -89,7 +89,7 @@ class OnlineTacticsTests(unittest.TestCase):
         miner.add_game(self.capture, 27)
         cases = miner.cases()
         snapshots = _snapshots(self.capture)
-        self.assertLessEqual(len(cases), 4)
+        self.assertLessEqual(len(cases), 5)
         self.assertTrue(cases)
         for case in cases:
             ply = case["source"]["ply"]
@@ -109,7 +109,8 @@ class OnlineTacticsTests(unittest.TestCase):
         miner.add_game(self.capture, 0)
         cases = {case["source"]["selection_slot"]: case for case in miner.cases()}
         self.assertEqual(set(cases),
-                         {"threat_onset", "threat_follow_up", "best_overall", "atari_defense"})
+                         {"threat_onset", "threat_follow_up", "best_overall", "atari_defense",
+                          "pre_atari_defense"})
         onset = cases["threat_onset"]
         followup = cases["threat_follow_up"]
         self.assertGreaterEqual(followup["source"]["ply"], onset["source"]["ply"] + 2)
@@ -131,6 +132,13 @@ class OnlineTacticsTests(unittest.TestCase):
         # Regression for the observed long chase: the nine-ply position is now
         # eligible without hard-coding the game's name/coordinates in mining.
         self.assertEqual(followup["source"]["ply"], 17)
+        pre_defense = cases["pre_atari_defense"]
+        self.assertEqual(pre_defense["motif"], "self_play_pre_atari_defense")
+        defending = load_position(pre_defense)
+        self.assertTrue(any(cell == defending.to_play
+                            and len(defending.board.group_at(engine.Board.position(index))) >= 2
+                            and len(defending.board.liberties(engine.Board.position(index))) == 2
+                            for index, cell in enumerate(defending.board.cells)))
         snapshots = _snapshots(self.capture)
         for case in cases.values():
             _assert_state(self, load_position(case), snapshots[case["source"]["ply"]])
@@ -148,14 +156,16 @@ class OnlineTacticsTests(unittest.TestCase):
         self.assertEqual(len({case["family_id"] for case in cases}), 32)
         slots = {case["source"]["selection_slot"] for case in cases}
         self.assertEqual(slots,
-                         {"threat_onset", "threat_follow_up", "best_overall", "atari_defense"})
-        self.assertLessEqual(miner.candidate_count, 128)
+                         {"threat_onset", "threat_follow_up", "best_overall", "atari_defense",
+                          "pre_atari_defense"})
+        self.assertLessEqual(miner.candidate_count, 160)
         # Each game's first chosen slot is rotated before global selection, not
         # an always-best choice with onset positions left for a later pass.
         for case in cases:
             game_index = case["source"]["game_index"]
-            expected = ("threat_onset", "threat_follow_up", "best_overall", "atari_defense")
-            self.assertEqual(case["source"]["selection_slot"], expected[(7 + game_index) % 4])
+            expected = ("threat_onset", "threat_follow_up", "best_overall", "atari_defense",
+                        "pre_atari_defense")
+            self.assertEqual(case["source"]["selection_slot"], expected[(7 + game_index) % 5])
 
     def test_prefix_replay_preserves_permanent_house_stock_and_pass_history(self):
         miner = self.miner()
@@ -190,7 +200,7 @@ class OnlineTacticsTests(unittest.TestCase):
         self.assertEqual(miner.sampled_game_indices, tuple(reference))
         cases = miner.cases()
         self.assertLessEqual(len(cases), 3)
-        self.assertLessEqual(miner.candidate_count, 12)
+        self.assertLessEqual(miner.candidate_count, 15)
         self.assertEqual(len({case["family_id"] for case in cases}), len(cases))
 
     def test_generator_roundtrip_and_cached_calls_are_reproducible(self):

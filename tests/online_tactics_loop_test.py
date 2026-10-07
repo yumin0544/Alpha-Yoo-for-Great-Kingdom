@@ -86,11 +86,11 @@ class OnlineTacticsLoopTest(unittest.TestCase):
     def test_new_proofs_mix_without_inventing_extra_adam_updates_or_games(self):
         trainer = self.trainer()
         batches = []
-        actual_step = loop.train_step
-        def step(model, optimizer, batch):
-            batches.append(batch.policy.cpu().clone())
-            return actual_step(model, optimizer, batch)
-        with patch.object(loop, "train_step", side_effect=step):
+        from kingdom_ai.training import train_mixed_step
+        def step(model, optimizer, normal, proof):
+            batches.append(torch.cat((normal.policy, proof.policy)).cpu().clone())
+            return train_mixed_step(model, optimizer, normal, proof)
+        with patch("kingdom_ai.training.train_mixed_step", side_effect=step):
             metrics = self.run_mock(trainer, [teacher(), teacher("shallow", 1)])
         self.assertEqual((trainer.iteration, trainer.self_play_games, trainer.training_steps,
                           trainer.tactical_training_steps, trainer.champion_version), (1, 2, 2, 0, 0))
@@ -157,6 +157,10 @@ class OnlineTacticsLoopTest(unittest.TestCase):
             trainer.save_checkpoint(path)
             payload = torch.load(path, weights_only=True)
             payload["checkpoint_version"] = 6
+            payload.pop("training_budget_history")
+            payload["progress"].pop("normal_training_steps")
+            for key in loop._ADAPTIVE_CONFIG_KEYS:
+                payload["config"].pop(key)
             payload.pop("online_tactical_replay")
             for key in _ONLINE_CONFIG_KEYS:
                 payload["config"].pop(key)

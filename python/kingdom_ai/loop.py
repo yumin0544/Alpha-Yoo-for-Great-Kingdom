@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields, replace
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -47,6 +48,7 @@ class TrainingConfig:
     promotion_threshold: float = 0.55
     seed: int = 42
     self_play_backend: str = "cpu"
+    self_play_model: str = "champion"
     self_play_batch_size: int = 128
     augment_symmetries: bool = False
     temperature_moves: int | None = None
@@ -62,6 +64,7 @@ class TrainingConfig:
     online_tactics_fraction: float = 0.25
     online_tactics_replay_capacity: int = 1024
     online_tactics_min_proof_depth: int = 3
+    online_tactics_include_loss: bool = False
 
     def __post_init__(self):
         positive_ints = (
@@ -78,6 +81,8 @@ class TrainingConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if type(self.self_play_backend) is not str or self.self_play_backend not in ("cpu", "cuda"):
             raise ValueError("self_play_backend must be 'cpu' or 'cuda'")
+        if type(self.self_play_model) is not str or self.self_play_model not in ("champion", "learner"):
+            raise ValueError("self_play_model must be 'champion' or 'learner'")
         if self.self_play_backend == "cuda" and self.simulations > 2 ** 31 - 2:
             raise ValueError("CUDA simulations must not exceed 2147483646")
         if type(self.augment_symmetries) is not bool or type(self.self_play_tactical_checks) is not bool:
@@ -94,8 +99,8 @@ class TrainingConfig:
         if self.self_play_backend != "cuda" and (
                 self.self_play_tactical_checks or self.self_play_fpu_reduction is not None):
             raise ValueError("Training tactical checks and FPU require CUDA self-play")
-        if type(self.online_tactics) is not bool:
-            raise ValueError("online_tactics must be a bool")
+        if type(self.online_tactics) is not bool or type(self.online_tactics_include_loss) is not bool:
+            raise ValueError("online_tactics and online_tactics_include_loss must be bool")
         if not self.online_tactics_min_proof_depth <= self.online_tactics_max_depth <= 256:
             raise ValueError("Online tactics requires min_proof_depth <= max_depth <= 256")
         if self.online_tactics_time_limit_ms > 2 ** 31 - 1:
@@ -138,7 +143,8 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 7
+_CHECKPOINT_VERSION = 8
+_ADAPTIVE_CONFIG_KEYS = {"self_play_model", "online_tactics_include_loss"}
 _ONLINE_CONFIG_KEYS = {"online_tactics", "online_tactics_max_cases", "online_tactics_max_depth",
                        "online_tactics_max_nodes", "online_tactics_time_limit_ms",
                        "online_tactics_generation_seconds", "online_tactics_fraction",
@@ -161,12 +167,14 @@ _CHECKPOINT_KEYS = {
     "last_metrics",
 }
 _CHECKPOINT_KEYS_V7 = _CHECKPOINT_KEYS | {"online_tactical_replay"}
+_CHECKPOINT_KEYS_V8 = _CHECKPOINT_KEYS_V7 | {"training_budget_history"}
 _RUNTIME_KEYS_V4 = {"evaluation_workers"}
 _RUNTIME_KEYS = _RUNTIME_KEYS_V4 | {
     "evaluation_backend", "evaluation_leaf_batch_size", "evaluation_reuse_tree",
 }
 _PROGRESS_KEYS_V5 = {"iteration", "self_play_games", "training_steps", "champion_version"}
-_PROGRESS_KEYS = _PROGRESS_KEYS_V5 | {"tactical_training_steps"}
+_PROGRESS_KEYS_V6 = _PROGRESS_KEYS_V5 | {"tactical_training_steps"}
+_PROGRESS_KEYS = _PROGRESS_KEYS_V6 | {"normal_training_steps"}
 
 
 def _cpu_copy(value):
@@ -199,6 +207,41 @@ def _model_state(model):
            for tensor in state.values()):
         raise ValueError("Training models must contain finite float32 parameters")
     return state
+
+
+def _model_digest(model):
+    """Identify the exact frozen actor independently of checkpoint ZIP metadata."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(model.state_dict().items()):
+        tensor = tensor.detach().cpu().contiguous()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("ascii"))
+        digest.update(str(tuple(tensor.shape)).encode("ascii"))
+        digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _validate_budget_history(history, iteration, configured_steps):
+    """A segment starting at k applies to completed cycles k+1 and later."""
+    if not isinstance(history, list) or not history:
+        raise ValueError("Invalid training budget history")
+    previous = -1
+    for segment in history:
+        if (not isinstance(segment, dict)
+                or set(segment) != {"start_iteration", "train_steps_per_iteration"}
+                or type(segment["start_iteration"]) is not int
+                or not previous < segment["start_iteration"] <= iteration
+                or type(segment["train_steps_per_iteration"]) is not int
+                or segment["train_steps_per_iteration"] < 1):
+            raise ValueError("Invalid training budget history")
+        previous = segment["start_iteration"]
+    if (history[0]["start_iteration"] != 0
+            or history[-1]["train_steps_per_iteration"] != configured_steps):
+        raise ValueError("Training budget history does not match configuration")
+    return sum(((history[index + 1]["start_iteration"] if index + 1 < len(history)
+                 else iteration) - segment["start_iteration"])
+               * segment["train_steps_per_iteration"]
+               for index, segment in enumerate(history))
 
 
 def _restore_model(config, state):
@@ -287,7 +330,8 @@ def _validate_rng(payload):
 class Trainer:
     """Run additional complete iterations; checkpoints are iteration boundaries.
 
-    Self-play uses the current champion. The learner keeps its optimizer and
+    Self-play uses the configured champion or a cycle-frozen latest learner.
+    The learner keeps its optimizer and
     continues training even when evaluation rejects promotion. A failed or
     interrupted iteration must be discarded by loading the last checkpoint.
     """
@@ -336,6 +380,9 @@ class Trainer:
         self.generator = torch.Generator(device="cpu").manual_seed(config.seed)
         self.iteration = self.self_play_games = self.training_steps = self.champion_version = 0
         self.tactical_training_steps = 0
+        self.normal_training_steps = 0
+        self.training_budget_history = [{"start_iteration": 0,
+                                        "train_steps_per_iteration": config.train_steps_per_iteration}]
         self._at_boundary = True
         self._last_metrics = None
         if config.online_tactics:
@@ -373,16 +420,17 @@ class Trainer:
     def reconfigure(self, **overrides):
         """Change learning/search settings at a saved boundary without resetting state.
 
-        Historical counter invariants require the iteration game/update budgets
-        and replay capacity to remain fixed. Architecture, RNG, replay contents,
+        Historical game counters and replay capacity remain fixed. Update budget
+        changes apply only to future cycles and are recorded in a segment ledger.
+        Architecture, RNG, replay contents,
         optimizer moments and progress are preserved. Call save_checkpoint() on
         a NEW path to persist the changed settings before continuing.
         """
         if not self._at_boundary:
             raise RuntimeError("Cannot reconfigure an incomplete iteration")
-        immutable = {"games_per_iteration", "train_steps_per_iteration", "replay_capacity", "seed"}
+        immutable = {"games_per_iteration", "replay_capacity", "seed"}
         if immutable.intersection(overrides):
-            raise ValueError("Reconfiguration cannot change games, training steps, replay capacity or seed")
+            raise ValueError("Reconfiguration cannot change games, replay capacity or seed")
         try:
             config = replace(self.config, **overrides)
         except TypeError as error:
@@ -395,6 +443,13 @@ class Trainer:
                 and len(self.online_tactical_replay)):
             raise ValueError("Cannot resize a nonempty certified tactical replay")
         # Validation above completes before changing any owned state.
+        if config.train_steps_per_iteration != self.config.train_steps_per_iteration:
+            segment = {"start_iteration": self.iteration,
+                       "train_steps_per_iteration": config.train_steps_per_iteration}
+            if self.training_budget_history[-1]["start_iteration"] == self.iteration:
+                self.training_budget_history[-1] = segment
+            else:
+                self.training_budget_history.append(segment)
         if config.online_tactics_replay_capacity != self.online_tactical_replay.capacity:
             self.online_tactical_replay = CertifiedTacticalReplay(config.online_tactics_replay_capacity)
         self.config = config
@@ -404,6 +459,10 @@ class Trainer:
 
     def _collect_games(self):
         config = self.config
+        # No optimizer update occurs during collection. Own a frozen learner copy
+        # across ALL chunks/games; never let rejected promotion revert this actor.
+        actor = (deepcopy(self.model).eval() if config.self_play_model == "learner"
+                 else self.champion)
         schedule_options = ({} if config.temperature_moves is None else {
             "temperature_moves": config.temperature_moves,
             "final_temperature": config.final_temperature,
@@ -424,7 +483,7 @@ class Trainer:
                 )
                 count = min(config.self_play_batch_size, config.games_per_iteration - offset)
                 yield from collect_gpu_puct_games(
-                    self.champion, count, options=options, temperature=config.temperature,
+                    actor, count, options=options, temperature=config.temperature,
                     seed=seed, batch_size=config.self_play_batch_size, device=self.device,
                     **schedule_options,
                 )
@@ -436,7 +495,7 @@ class Trainer:
                     dirichlet_alpha=config.dirichlet_alpha,
                     dirichlet_epsilon=config.dirichlet_epsilon,
                 )
-                yield collect_puct_game(self.champion, options=options,
+                yield collect_puct_game(actor, options=options,
                                         temperature=config.temperature, seed=seed,
                                         **schedule_options)
 
@@ -451,6 +510,11 @@ class Trainer:
         self._synchronize()
         started = perf_counter()
         config = self.config
+        actor_metadata = {"role": config.self_play_model, "iteration": self.iteration,
+                          "training_steps": self.training_steps,
+                          "champion_version": self.champion_version,
+                          "weights_sha256": _model_digest(
+                              self.model if config.self_play_model == "learner" else self.champion)}
         endings = {}
         winners = {"Black": 0, "White": 0}
         game_plies = []
@@ -510,8 +574,10 @@ class Trainer:
             proved, generation = collect_certified_samples(
                 cases, options, max_cases=config.online_tactics_max_cases,
                 generation_seconds=config.online_tactics_generation_seconds,
-                bound_remaining_time=True)
-            eligible = [row for row in proved
+                bound_remaining_time=True,
+                **({"include_loss": True} if config.online_tactics_include_loss else {}))
+            eligible = [replace(row, proof={**row.proof, "self_play_actor": deepcopy(actor_metadata)})
+                        for row in proved
                         if row.proof["proof_depth"] >= config.online_tactics_min_proof_depth]
             eligible_ids = {row.case_id for row in eligible}
             for record in generation["records"]:
@@ -530,8 +596,17 @@ class Trainer:
                                   "time_limit_ms": config.online_tactics_time_limit_ms,
                                   "generation_budget_seconds": config.online_tactics_generation_seconds,
                                   "min_proof_depth": config.online_tactics_min_proof_depth})
+            online_report["include_loss"] = config.online_tactics_include_loss
+            online_report["actor"] = actor_metadata
         training_started = perf_counter()
         loss_totals = dict.fromkeys(("loss", "policy_loss", "value_loss"), 0.0)
+        category_rows = {
+            "teacher_win_value_loss": "teacher_win_rows",
+            "teacher_loss_value_loss": "teacher_loss_rows",
+            **{f"{source}_{color}_value_loss": f"{source}_{color}_rows"
+               for source in ("normal", "teacher") for color in ("black", "white")},
+        }
+        weighted_losses, drawn_rows = {}, {}
         tactical_rows = (max(1, min(config.batch_size - 1,
                                    round(config.batch_size * config.online_tactics_fraction)))
                          if config.online_tactics and len(self.online_tactical_replay) else 0)
@@ -539,22 +614,37 @@ class Trainer:
             batch = self.replay.sample(config.batch_size - tactical_rows, generator=self.generator,
                                        device=self.device)
             if tactical_rows:
-                from .training import TrainingBatch
+                from .training import augment_proof_batch, train_mixed_step
                 teacher = self.online_tactical_replay.sample(
                     tactical_rows, generator=self.generator, device=self.device)
-                batch = TrainingBatch(*(torch.cat((getattr(teacher, field), getattr(batch, field)), dim=0)
-                                        for field in ("features", "legal_mask", "policy", "value")))
             if config.augment_symmetries:
                 batch = augment_batch(batch, generator=self.generator)
-            losses = train_step(self.model, self.optimizer, batch)
-            for key in loss_totals:
-                loss_totals[key] += losses[key]
+                if tactical_rows:
+                    teacher = augment_proof_batch(teacher, generator=self.generator)
+            if tactical_rows:
+                losses = train_mixed_step(self.model, self.optimizer, batch, teacher)
+            else:
+                losses = train_step(self.model, self.optimizer, batch)
+                losses.update(normal_policy_loss=losses["policy_loss"],
+                              normal_value_loss=losses["value_loss"])
+            for key, value in losses.items():
+                loss_totals[key] = loss_totals.get(key, 0.0) + value
+                if key.endswith("_rows"):
+                    drawn_rows[key] = drawn_rows.get(key, 0) + value
+            for key, count_key in category_rows.items():
+                if key in losses:
+                    weighted_losses[key] = weighted_losses.get(key, 0.0) + losses[key] * losses[count_key]
             self.training_steps += 1
+            self.normal_training_steps += 1
         self._synchronize()
         training_seconds = perf_counter() - training_started
         online_report.update({"mixed_updates": config.train_steps_per_iteration if tactical_rows else 0,
                               "tactical_rows_per_batch": tactical_rows,
-                              "replay_rows_per_batch": config.batch_size - tactical_rows})
+                              "replay_rows_per_batch": config.batch_size - tactical_rows,
+                              "actual_tactical_fraction": tactical_rows / config.batch_size,
+                              "normal_training_draws": (config.batch_size - tactical_rows)
+                                  * config.train_steps_per_iteration,
+                              "tactical_training_draws": tactical_rows * config.train_steps_per_iteration})
         evaluation_started = perf_counter()
         evaluation_options = ({"tactical_checks": True} if config.self_play_tactical_checks else {})
         evaluation_diagnostics = {}
@@ -584,10 +674,13 @@ class Trainer:
         sorted_plies = sorted(game_plies)
         p95_plies = sorted_plies[math.ceil(0.95 * len(sorted_plies)) - 1]
         metrics = {
-            "metrics_schema_version": 2,
+            "metrics_schema_version": 3,
             "iteration": self.iteration, "self_play_games": self.self_play_games,
             "training_steps": self.training_steps, "champion_version": self.champion_version,
             "tactical_training_steps": self.tactical_training_steps,
+            "normal_training_steps": self.normal_training_steps,
+            "self_play_model": config.self_play_model,
+            "self_play_actor": actor_metadata,
             "online_tactics": online_report,
             "online_tactics_seconds": online_report["seconds"],
             "generated_samples": samples, "replay_size": len(self.replay),
@@ -597,6 +690,10 @@ class Trainer:
             "self_play_endings": endings,
             "self_play_winners": winners,
             **{key: value / config.train_steps_per_iteration for key, value in loss_totals.items()},
+            **{key: value / drawn_rows[category_rows[key]]
+               if drawn_rows[category_rows[key]] else 0.0
+               for key, value in weighted_losses.items()},
+            "training_draw_counts": drawn_rows,
             "evaluation": {**asdict(evaluation), "win_rate": evaluation.win_rate},
             "promoted": promoted, "self_play_seconds": self_play_seconds,
             "self_play_compute_seconds": self_play_compute_seconds,
@@ -618,6 +715,11 @@ class Trainer:
             "training_batch_size": config.batch_size,
             "train_steps_per_iteration": config.train_steps_per_iteration,
             "training_samples_drawn": training_samples_drawn,
+            "normal_training_samples_drawn": (config.batch_size - tactical_rows)
+                * config.train_steps_per_iteration,
+            "tactical_training_samples_drawn": tactical_rows * config.train_steps_per_iteration,
+            "normal_training_draws_per_generated_sample": (config.batch_size - tactical_rows)
+                * config.train_steps_per_iteration / samples,
             "training_draws_per_generated_sample": training_samples_drawn / samples,
             "training_draws_per_replay_sample": training_samples_drawn / len(self.replay),
             "augment_symmetries": config.augment_symmetries,
@@ -644,6 +746,7 @@ class Trainer:
         payload = {
             "checkpoint_version": _CHECKPOINT_VERSION, "schema": deepcopy(_SCHEMA),
             "online_tactical_replay": self.online_tactical_replay.state_dict(),
+            "training_budget_history": deepcopy(self.training_budget_history),
             "config": asdict(self.config), "model_config": self.model.model_config,
             "model": _model_state(self.model), "champion": _model_state(self.champion),
             "optimizer": _cpu_copy(self.optimizer.state_dict()), "replay": self.replay.state_dict(),
@@ -676,9 +779,10 @@ class Trainer:
         if not isinstance(payload, dict):
             raise ValueError("Unexpected training checkpoint fields")
         version = payload.get("checkpoint_version")
-        if type(version) is not int or version not in (1, 2, 3, 4, 5, 6, _CHECKPOINT_VERSION):
+        if type(version) is not int or version not in range(1, _CHECKPOINT_VERSION + 1):
             raise ValueError("Unsupported training checkpoint version")
-        expected_keys = (_CHECKPOINT_KEYS_V7 if version >= 7 else _CHECKPOINT_KEYS if version >= 4
+        expected_keys = (_CHECKPOINT_KEYS_V8 if version >= 8 else _CHECKPOINT_KEYS_V7 if version >= 7
+                         else _CHECKPOINT_KEYS if version >= 4
                          else _CHECKPOINT_KEYS - {"runtime"})
         if set(payload) != expected_keys:
             raise ValueError("Unexpected training checkpoint fields")
@@ -686,6 +790,8 @@ class Trainer:
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
         config_keys = {field.name for field in fields(TrainingConfig)}
+        if version < 8:
+            config_keys -= _ADAPTIVE_CONFIG_KEYS
         if version < 7:
             config_keys -= _ONLINE_CONFIG_KEYS
         if version < 3:
@@ -696,14 +802,21 @@ class Trainer:
             raise ValueError("Invalid checkpoint training configuration")
         config = TrainingConfig(**raw_config)
         progress = payload["progress"]
-        expected_progress = _PROGRESS_KEYS if version >= 6 else _PROGRESS_KEYS_V5
+        expected_progress = (_PROGRESS_KEYS if version >= 8 else _PROGRESS_KEYS_V6 if version >= 6
+                             else _PROGRESS_KEYS_V5)
         if (not isinstance(progress, dict) or set(progress) != expected_progress
                 or any(type(value) is not int or value < 0 for value in progress.values())
                 or progress["self_play_games"] != progress["iteration"] * config.games_per_iteration
-                or progress["training_steps"] != (progress["iteration"] * config.train_steps_per_iteration
-                                                   + progress.get("tactical_training_steps", 0))
                 or progress["champion_version"] > progress["iteration"]):
             raise ValueError("Checkpoint progress counters are inconsistent")
+        budget_history = (payload["training_budget_history"] if version >= 8 else
+                          [{"start_iteration": 0,
+                            "train_steps_per_iteration": config.train_steps_per_iteration}])
+        normal_steps = _validate_budget_history(budget_history, progress["iteration"],
+                                                config.train_steps_per_iteration)
+        if (progress.get("normal_training_steps", normal_steps) != normal_steps
+                or progress["training_steps"] != normal_steps + progress.get("tactical_training_steps", 0)):
+            raise ValueError("Checkpoint progress counters are inconsistent with training budget history")
         model = _restore_model(payload["model_config"], payload["model"])
         champion = _restore_model(payload["model_config"], payload["champion"])
         replay = ReplayBuffer.from_state_dict(payload["replay"])
@@ -775,6 +888,11 @@ class Trainer:
             progress = {**progress, "tactical_training_steps": 0}
             if last_metrics is not None:
                 last_metrics = {**last_metrics, "tactical_training_steps": 0}
+        if version < 8:
+            progress = {**progress, "normal_training_steps": normal_steps}
+            if last_metrics is not None:
+                last_metrics = {**last_metrics, "normal_training_steps": normal_steps}
+        trainer.training_budget_history = deepcopy(budget_history)
         for name, value in progress.items():
             setattr(trainer, name, value)
         trainer._last_metrics = deepcopy(last_metrics)
@@ -789,6 +907,12 @@ class Trainer:
         if not self._at_boundary:
             raise RuntimeError("Export the champion only at a completed iteration boundary")
         _atomic_write(path, lambda temporary: save_model(self.champion, temporary))
+
+    def export_learner(self, path):
+        """Portable latest candidate, independent of champion promotion."""
+        if not self._at_boundary:
+            raise RuntimeError("Export the learner only at a completed iteration boundary")
+        _atomic_write(path, lambda temporary: save_model(self.model, temporary))
 
     def run(self, iterations, checkpoint_path=None, metrics_path=None, on_iteration=None,
             collect_metrics=True):

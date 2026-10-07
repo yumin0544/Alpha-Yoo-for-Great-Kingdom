@@ -144,7 +144,7 @@ if(BUILD_TESTING)
                 "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/puct_test.py"
             )
             set_tests_properties(puct_test PROPERTIES TIMEOUT 120)
-            foreach(learning_test IN ITEMS replay_test evaluation_test model_match_test model_match_cli_test play_ui_test arena_ui_test reinforcement_test batching_test gpu_rules_test gpu_puct_test gpu_training_test selfplay_history_test gpu_trainer_test augmentation_test temperature_schedule_test tactics_test tactical_binding_test deep_tactics_test tactical_positions_test tactical_training_test online_tactics_test online_tactics_loop_test strength_config_test metrics_test batched_binding_test encoded_batching_test batched_evaluation_test batched_runtime_test)
+            foreach(learning_test IN ITEMS replay_test evaluation_test model_match_test model_match_cli_test play_ui_test arena_ui_test reinforcement_test batching_test gpu_rules_test gpu_puct_test gpu_training_test selfplay_history_test gpu_trainer_test augmentation_test temperature_schedule_test tactics_test tactical_binding_test deep_tactics_test tactical_positions_test tactical_training_test online_tactics_test online_tactics_loop_test strength_config_test metrics_test batched_binding_test encoded_batching_test batched_evaluation_test batched_runtime_test adaptive_training_test candidate_export_test plateau_cli_test proof_loss_test)
                 add_test(NAME ${learning_test} COMMAND "${CMAKE_COMMAND}" -E env
                     "PYTHONPATH=$<TARGET_FILE_DIR:my_board_engine>${neural_path_separator}${CMAKE_CURRENT_SOURCE_DIR}/python"
                     "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/${learning_test}.py"

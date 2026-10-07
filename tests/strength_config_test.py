@@ -73,6 +73,10 @@ class StrengthConfigTest(unittest.TestCase):
         self.trainer.save_checkpoint(original)
         payload = torch.load(original, weights_only=True)
         payload["checkpoint_version"] = 2
+        payload.pop("training_budget_history")
+        payload["progress"].pop("normal_training_steps")
+        for key in loop._ADAPTIVE_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload.pop("online_tactical_replay")
         for key in loop._ONLINE_CONFIG_KEYS:
             payload["config"].pop(key)
@@ -89,13 +93,17 @@ class StrengthConfigTest(unittest.TestCase):
         equal(self, restored.replay.state_dict(), self.trainer.replay.state_dict())
         self.assertTrue(torch.equal(restored.generator.get_state(), self.trainer.generator.get_state()))
         restored.save_checkpoint(self.path / "upgraded.pt")
-        self.assertEqual(torch.load(self.path / "upgraded.pt", weights_only=True)["checkpoint_version"], 7)
+        self.assertEqual(torch.load(self.path / "upgraded.pt", weights_only=True)["checkpoint_version"], 8)
 
     def test_version_three_defaults_workers_and_upgrades_runtime_settings(self):
         source = self.path / "v4.pt"
         self.trainer.save_checkpoint(source)
         payload = torch.load(source, weights_only=True)
         payload["checkpoint_version"] = 3
+        payload.pop("training_budget_history")
+        payload["progress"].pop("normal_training_steps")
+        for key in loop._ADAPTIVE_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload.pop("online_tactical_replay")
         for key in loop._ONLINE_CONFIG_KEYS:
             payload["config"].pop(key)
@@ -111,7 +119,7 @@ class StrengthConfigTest(unittest.TestCase):
         upgraded = self.path / "upgraded-v4.pt"
         overridden.save_checkpoint(upgraded)
         upgraded_payload = torch.load(upgraded, weights_only=True)
-        self.assertEqual(upgraded_payload["checkpoint_version"], 7)
+        self.assertEqual(upgraded_payload["checkpoint_version"], 8)
         self.assertEqual(upgraded_payload["runtime"], {
             "evaluation_workers": 12, "evaluation_backend": "legacy",
             "evaluation_leaf_batch_size": 8, "evaluation_reuse_tree": True,
@@ -143,7 +151,7 @@ class StrengthConfigTest(unittest.TestCase):
     def test_invalid_reconfiguration_is_atomic(self):
         original = asdict(self.trainer.config)
         optimizer = deepcopy(self.trainer.optimizer.state_dict())
-        for settings in ({"games_per_iteration": 3}, {"train_steps_per_iteration": 3},
+        for settings in ({"games_per_iteration": 3}, {"train_steps_per_iteration": 0},
                          {"replay_capacity": 32}, {"seed": 0}, {"unknown": True},
                          {"temperature_moves": -1}, {"learning_rate": float("nan")},
                          {"self_play_tactical_checks": True}):

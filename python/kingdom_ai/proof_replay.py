@@ -1,20 +1,21 @@
-"""Bounded, resumable WIN-only teacher replay with matching proof metadata."""
+"""Bounded, resumable WIN-policy/LOSS-value teacher replay and certificates."""
 
 from copy import deepcopy
 import json
 
 import my_board_engine as engine
+import torch
 
 from .replay import ReplayBuffer
 from .tactical_training import CertifiedTacticalSample, _validated_samples
-from .training import TrainingSample
+from .training import ProofTrainingBatch, TrainingSample
 
 
 class CertifiedTacticalReplay:
     """Keep physical ring order and certificates so seeded resume is exact.
 
     A checkpoint preserves the solver's audit records, not a re-verification of
-    the entire minimax tree. Loading validates schema, WIN-only value/policy
+    the entire minimax tree. Loading validates schema, WIN/LOSS value/policy
     support and matching metadata; it does not invent proofs for observations.
     """
 
@@ -45,7 +46,7 @@ class CertifiedTacticalReplay:
                 "motif": row.motif, "proof": deepcopy(row.proof)}
 
     def extend(self, rows):
-        rows = _validated_samples(rows)
+        rows = _validated_samples(rows, allow_loss=True)
         metadata = [self._metadata(row) for row in rows]
         if not rows:
             return
@@ -59,22 +60,40 @@ class CertifiedTacticalReplay:
                 self._certificates[slot] = certificate
 
     def sample(self, batch_size, *, generator, device="cpu"):
-        return self._buffer.sample(batch_size, generator=generator, device=device)
+        batch = self._buffer.sample(batch_size, generator=generator, device=device)
+        # Validation requires WIN/+1 with policy and LOSS/-1 without policy.
+        # Deriving the sampled mask from that invariant avoids a second RNG
+        # draw and keeps masks aligned with physical ring slots on resume.
+        return ProofTrainingBatch(batch.features, batch.legal_mask, batch.policy,
+                                  batch.value, batch.value == 1)
 
     def state_dict(self):
-        return {"version": 1, "replay": self._buffer.state_dict(),
-                "certificates": deepcopy(self._certificates)}
+        return {"version": 2, "replay": self._buffer.state_dict(),
+                "certificates": deepcopy(self._certificates),
+                "policy_enabled": torch.tensor([
+                    row["proof"]["outcome"] == "WIN" for row in self._certificates],
+                    dtype=torch.bool, device="cpu")}
 
     @classmethod
     def from_state_dict(cls, payload):
-        if (not isinstance(payload, dict)
-                or set(payload) != {"version", "replay", "certificates"}
-                or type(payload["version"]) is not int or payload["version"] != 1):
+        if (not isinstance(payload, dict) or type(payload.get("version")) is not int
+                or payload["version"] not in (1, 2)):
             raise ValueError("Invalid teacher replay checkpoint")
+        expected = {"version", "replay", "certificates"}
+        if payload["version"] == 2:
+            expected.add("policy_enabled")
+        if set(payload) != expected:
+            raise ValueError("Invalid teacher replay checkpoint fields")
         replay = ReplayBuffer.from_state_dict(payload["replay"])
         certificates = payload["certificates"]
         if not isinstance(certificates, list) or len(certificates) != len(replay):
             raise ValueError("Teacher certificates must match occupied replay slots")
+        policy_enabled = (torch.ones(len(replay), dtype=torch.bool)
+                          if payload["version"] == 1 else payload["policy_enabled"])
+        if (not isinstance(policy_enabled, torch.Tensor) or policy_enabled.layout != torch.strided
+                or policy_enabled.dtype != torch.bool or policy_enabled.shape != (len(replay),)):
+            raise ValueError("Teacher policy mask must be a bool tensor matching occupied slots")
+        policy_enabled = policy_enabled.detach().to(device="cpu")
         data = replay.state_dict()
         rows = []
         for index, certificate in enumerate(certificates):
@@ -85,10 +104,11 @@ class CertifiedTacticalReplay:
             actor = engine.Cell.Black if int(data["to_play"][index]) == 1 else engine.Cell.White
             sample = TrainingSample(data["features"][index], data["legal_mask"][index],
                                     data["policy"][index], float(data["value"][index]), actor)
-            row = CertifiedTacticalSample(sample=sample, **certificate)
+            row = CertifiedTacticalSample(sample=sample, **certificate,
+                                           policy_enabled=bool(policy_enabled[index]))
             cls._metadata(row)
             rows.append(row)
-        _validated_samples(rows)
+        _validated_samples(rows, allow_loss=payload["version"] == 2)
         restored = cls(replay.capacity)
         restored._buffer = replay
         restored._certificates = deepcopy(certificates)

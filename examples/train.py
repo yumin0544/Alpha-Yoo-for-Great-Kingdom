@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--iterations", type=positive_integer, default=1,
                         help="이번 실행에서 추가로 진행할 반복 수 (기본 1)")
     parser.add_argument("--output", type=Path, default=Path("runs/rl"),
-                        help="latest.pt, best.pt, metrics.jsonl 저장 폴더")
+                        help="latest.pt, best.pt, candidate.pt, metrics.jsonl 저장 폴더")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--resume", type=Path, help="전체 학습 체크포인트 latest.pt")
     source.add_argument("--initial-model", type=Path, help="새 학습에 사용할 기존 모델 가중치")
@@ -33,6 +33,8 @@ def main():
     parser.add_argument("--device", default="cpu", help="cpu 또는 사용 가능한 cuda 장치")
     parser.add_argument("--self-play-backend", choices=("cpu", "cuda"),
                         help="자가 대국 규칙·탐색 장치 (기본 cpu); cuda는 --device cuda 필요")
+    parser.add_argument("--self-play-model", choices=("champion", "learner"),
+                        help="자가 대국 모델; 새 학습 기본 champion, 재개 시 저장값 복원")
     parser.add_argument("--augment-symmetries", action=argparse.BooleanOptionalAction, default=None,
                         help="학습 위치·정책에 8가지 회전/반사 중 하나를 무작위 적용")
     parser.add_argument("--self-play-tactical-checks", action=argparse.BooleanOptionalAction,
@@ -41,7 +43,10 @@ def main():
                         help="CUDA 미방문 수 가치=신경망 가치-지정값 (미지정은 기존 Q=0)")
     parser.add_argument("--online-tactics", action=argparse.BooleanOptionalAction,
                         default=None,
-                        help="매 사이클 새 자가 대국 위치의 깊은 승리 증명과 전술 혼합 학습")
+                        help="매 사이클 새 자가 대국 위치의 깊은 승패 증명과 전술 혼합 학습")
+    parser.add_argument("--online-tactics-include-loss", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="새 LOSS 증명을 가치 전용 자료로 수집 (기본 꺼짐; 기존 자료 보존)")
     parser.add_argument("--online-tactics-max-cases", type=positive_integer, default=None,
                         help="사이클당 CPU 전술 탐색 위치 상한 (새 학습 기본 32)")
     parser.add_argument("--online-tactics-max-depth", type=positive_integer, default=None,
@@ -88,7 +93,11 @@ def main():
         "final-temperature": "final_temperature",
     }
     for flag, field in integer_flags.items():
-        parser.add_argument("--" + flag, dest=field, type=positive_integer)
+        parser.add_argument(
+            "--" + flag, dest=field, type=positive_integer,
+            help=("한 사이클 갱신 수; 재개 변경은 --reconfigure와 새 --output 필요"
+                  if flag == "train-steps" else None),
+        )
     for flag, field in real_flags.items():
         parser.add_argument("--" + flag, dest=field, type=float)
     parser.add_argument("--seed", type=int)
@@ -107,16 +116,18 @@ def main():
         parser.error("기존 모델을 읽을 때 채널 수와 잔차 블록 수를 지정할 수 없습니다.")
     latest = args.output / "latest.pt"
     best = args.output / "best.pt"
+    candidate = args.output / "candidate.pt"
     metrics = args.output / "metrics.jsonl"
+    artifacts = (latest, best, candidate, metrics)
     if args.reconfigure and (
-            any(path.exists() for path in (latest, best, metrics))
+            any(path.exists() for path in artifacts)
             or latest.resolve() == args.resume.resolve()):
         parser.error("설정 변경 시 기존 기록을 보존하도록 새 --output 폴더를 사용하세요.")
-    if not args.resume and any(path.exists() for path in (latest, best, metrics)):
+    if not args.resume and any(path.exists() for path in artifacts):
         parser.error("출력 폴더에 기존 학습 기록이 있습니다. --resume 또는 새 --output을 사용하세요.")
     if args.resume and latest.exists() and latest.resolve() != args.resume.resolve():
         parser.error("다른 학습의 latest.pt가 있는 출력 폴더입니다. 새 --output을 사용하세요.")
-    if args.resume and not latest.exists() and (best.exists() or metrics.exists()):
+    if args.resume and not latest.exists() and any(path.exists() for path in (best, candidate, metrics)):
         parser.error("출력 폴더에 재개 파일 없는 학습 기록이 있습니다. 새 --output을 사용하세요.")
     torch.set_num_threads(args.threads)
     try:
@@ -155,6 +166,7 @@ def main():
         parser.error(str(error))
     print(
         f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판, "
+        f"자료 생성 모델 {trainer.config.self_play_model}, "
         f"평가 {trainer.evaluation_backend}, worker {trainer.evaluation_workers}개, "
         f"leaf 배치 {trainer.evaluation_leaf_batch_size}, 트리 재사용 {trainer.evaluation_reuse_tree}"
     )
@@ -163,6 +175,7 @@ def main():
 
     def report(row):
         trainer.export_champion(best)
+        trainer.export_learner(candidate)
         evaluation = row["evaluation"]
         print(
             f"반복 {row['iteration']}: 자가 대국 누적 {row['self_play_games']}판, "
@@ -198,6 +211,7 @@ def main():
         else:
             trainer.save_checkpoint(latest)
             trainer.export_champion(best)
+            trainer.export_learner(candidate)
             print("설정과 학습 상태를 저장했습니다. 추가 학습은 시작하지 않았습니다.")
     except KeyboardInterrupt:
         if latest.exists():
@@ -208,6 +222,7 @@ def main():
         return 130
     print(f"학습 재개 파일: {latest.resolve()}")
     print(f"기준 모델 파일: {best.resolve()}")
+    print(f"학습 후보 파일 (승격과 별개): {candidate.resolve()}")
     print(f"기록 파일{' (첫 반복 완료 시 생성)' if args.prepare_only else ''}: {metrics.resolve()}")
     return 0
 

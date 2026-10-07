@@ -2,8 +2,9 @@
 
 Ordinary Go ideas name the curriculum; only the verified Kingdom state
 transitions and a full-width solver provide targets. UNKNOWN is not a loss or
-a zero-valued draw. For now only nonterminal certified WIN positions are used:
-LOSS positions have a value label but no justified policy imitation target.
+a zero-valued draw. Certified LOSS positions can supply a value-only label;
+they have no justified policy imitation target. One-shot fine-tuning retains
+its WIN-only contract; the online teacher explicitly opts into LOSS rows.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ class CertifiedTacticalSample:
     motif: str
     sample: TrainingSample
     proof: dict
+    policy_enabled: bool = True
 
 
 def _integer(value, name, minimum=1):
@@ -58,7 +60,7 @@ def collect_certified_samples(cases: Sequence[dict], options, *,
                               load_position: Callable | None = None,
                               solver: Callable | None = None,
                               max_cases=64, generation_seconds=60.0,
-                              bound_remaining_time=False):
+                              bound_remaining_time=False, include_loss=False):
     """Solve bounded original cases, returning samples and an audit of all cases.
 
     ``winning_moves`` must be root moves proved WIN by the full-width solver.
@@ -70,6 +72,8 @@ def collect_certified_samples(cases: Sequence[dict], options, *,
     OS scheduling overhead are not a hard real-time bound.
     """
     _integer(max_cases, "max_cases")
+    if type(include_loss) is not bool:
+        raise ValueError("include_loss must be a bool")
     if type(bound_remaining_time) is not bool:
         raise ValueError("bound_remaining_time must be a bool")
     if bound_remaining_time and not isinstance(options, engine.TacticalSolverOptions):
@@ -100,6 +104,18 @@ def collect_certified_samples(cases: Sequence[dict], options, *,
         if not isinstance(state, engine.State):
             raise TypeError("Position loader must return an engine State")
         record = {"id": case_id, "family_id": family_id, "motif": case.get("motif", "unspecified")}
+        # Keep complete replayable input and provenance, not just model feature
+        # planes, which cannot reconstruct permanent territory ownership.
+        for field in ("position", "rules", "source"):
+            if field in case:
+                record[field] = deepcopy(case[field])
+        record["actor"] = state.to_play.name
+        record["rules"] = {
+            "suicide_rule": state.rules.suicide_rule.name,
+            "allow_own_territory_moves": state.rules.allow_own_territory_moves,
+            "allow_single_edge_territory": state.rules.allow_single_edge_territory,
+            "stones_per_player": state.rules.stones_per_player,
+        }
         if state.result.finished():
             records.append({**record, "outcome": "TERMINAL", "training_label": False})
             continue
@@ -140,28 +156,40 @@ def collect_certified_samples(cases: Sequence[dict], options, *,
                     not replayed.result.finished()
                     or (replayed.result.winner == state.to_play) != (outcome == "WIN")):
                 raise ValueError("Solver principal variation contradicts its proof outcome")
-        if outcome != "WIN":
-            # No arbitrary policy imitation from LOSS; no invented UNKNOWN target.
+        if outcome == "UNKNOWN" or (outcome == "LOSS" and not include_loss):
+            # No invented UNKNOWN target. LOSS is opt-in for online value-only
+            # training; legacy one-shot fine-tuning stays WIN-only.
             records.append(record)
             continue
         encoded = encode_state(state)
         actions = record["winning_actions"]
-        if (not actions or len(set(actions)) != len(actions)
+        if outcome == "WIN" and (not actions or len(set(actions)) != len(actions)
                 or any(not bool(encoded.legal_mask[action]) for action in actions)):
             raise ValueError("A nonterminal WIN proof must name distinct legal winning root moves")
+        if outcome == "LOSS" and actions:
+            raise ValueError("A LOSS proof cannot name winning root moves")
         policy = torch.zeros_like(encoded.legal_mask, dtype=torch.float32)
-        policy[actions] = 1.0 / len(actions)
+        if outcome == "WIN":
+            policy[actions] = 1.0 / len(actions)
+        else:
+            # Storage placeholder only. Never label a PV move as best defense.
+            policy[encoded.legal_mask] = 1.0 / int(encoded.legal_mask.sum())
         record["training_label"] = True
+        record["policy_enabled"] = outcome == "WIN"
+        record["target_kind"] = "policy_and_value" if outcome == "WIN" else "value_only"
         sample = TrainingSample(encoded.features.clone(), encoded.legal_mask.clone(),
-                                policy, 1.0, encoded.to_play)
+                                policy, 1.0 if outcome == "WIN" else -1.0, encoded.to_play)
         samples.append(CertifiedTacticalSample(case_id, family_id, str(record["motif"]),
-                                              sample, deepcopy(record)))
+                                              sample, deepcopy(record), outcome == "WIN"))
         records.append(record)
     return samples, {"cases_available": len(cases), "cases_solved": len(records),
-                     "certified_win_samples": len(samples),
+                     "certified_win_samples": sum(row.policy_enabled for row in samples),
+                     "certified_loss_samples": sum(not row.policy_enabled for row in samples),
+                     "certified_samples": len(samples),
                      "generation_seconds": perf_counter() - started,
                      "excluded_unknown": sum(row["outcome"] == "UNKNOWN" for row in records),
-                     "excluded_loss": sum(row["outcome"] == "LOSS" for row in records),
+                     "excluded_loss": sum(row["outcome"] == "LOSS" and not row["training_label"]
+                                          for row in records),
                      "records": records}
 
 
@@ -181,13 +209,22 @@ def _canonical_position(sample: TrainingSample):
     return hashlib.sha256(min(forms)).hexdigest()
 
 
-def _validated_samples(samples):
+def _validated_samples(samples, *, allow_loss=False):
+    if type(allow_loss) is not bool:
+        raise ValueError("allow_loss must be a bool")
     rows = list(samples)
     for row in rows:
-        if not isinstance(row, CertifiedTacticalSample) or row.proof.get("outcome") != "WIN":
+        if (not isinstance(row, CertifiedTacticalSample) or not isinstance(row.proof, dict)
+                or row.proof.get("outcome") not in (("WIN", "LOSS") if allow_loss else ("WIN",))):
             raise ValueError("Training requires certified WIN samples")
-        if row.sample.value != 1.0:
-            raise ValueError("Certified WIN targets must have current-player value +1")
+        outcome = row.proof["outcome"]
+        if (type(row.policy_enabled) is not bool
+                or row.policy_enabled != (outcome == "WIN")
+                or row.sample.value != (1.0 if outcome == "WIN" else -1.0)):
+            raise ValueError("Certified WIN/+1 enables policy; LOSS/-1 is value-only")
+        if "policy_enabled" in row.proof and (type(row.proof["policy_enabled"]) is not bool
+                                              or row.proof["policy_enabled"] != row.policy_enabled):
+            raise ValueError("Certificate policy mask disagrees with its target")
         if any(tensor.device.type != "cpu" for tensor in
                (row.sample.features, row.sample.legal_mask, row.sample.policy)):
             raise ValueError("Original tactical samples must be stored on CPU")
@@ -197,16 +234,21 @@ def _validated_samples(samples):
         checker = ReplayBuffer(1)
         checker.extend([row.sample])
         proof_actions = row.proof.get("winning_actions")
+        if outcome == "LOSS":
+            if proof_actions != []:
+                raise ValueError("Value-only LOSS certificates cannot name winning actions")
+            continue
         if (not isinstance(proof_actions, list) or not proof_actions
                 or any(type(action) is not int or not 0 <= action < 82 for action in proof_actions)
+                or len(proof_actions) != len(set(proof_actions))
                 or set(torch.nonzero(batch.policy[0] > 0).flatten().tolist()) != set(proof_actions)):
             raise ValueError("Policy support must equal the certified winning actions")
     return rows
 
 
-def split_tactical_samples(samples, *, heldout_fraction=0.25, seed=42):
+def split_tactical_samples(samples, *, heldout_fraction=0.25, seed=42, allow_loss=False):
     """Split original families before augmentation, also joining D4 duplicates."""
-    rows = _validated_samples(samples)
+    rows = _validated_samples(samples, allow_loss=allow_loss)
     if (isinstance(heldout_fraction, bool) or not isinstance(heldout_fraction, (int, float))
             or not math.isfinite(heldout_fraction) or not 0 < heldout_fraction < 1):
         raise ValueError("heldout_fraction must lie strictly between zero and one")
@@ -240,12 +282,13 @@ def split_tactical_samples(samples, *, heldout_fraction=0.25, seed=42):
             [row for index, row in enumerate(rows) if index in heldout_indices])
 
 
-def tactical_metrics(model, samples):
-    """Raw network, not search: known winning-action hits on original cases."""
-    rows = _validated_samples(samples)
+def tactical_metrics(model, samples, *, allow_loss=False):
+    """Raw network metrics; value-only LOSS rows are excluded from policy hits."""
+    rows = _validated_samples(samples, allow_loss=allow_loss)
     if not rows:
         return {"cases": 0, "certified_top1": None, "certified_top3": None,
-                "value_mse": None, "mean_value": None}
+                "value_mse": None, "mean_value": None, "win_cases": 0, "loss_cases": 0,
+                "win_value_mse": None, "loss_value_mse": None}
     device = next(model.parameters()).device
     flags = [(module, module.training) for module in model.modules()]
     model.eval()
@@ -258,10 +301,19 @@ def tactical_metrics(model, samples):
             logits = logits.masked_fill(~batch.legal_mask, -torch.inf)
             actions = logits.topk(3, dim=1).indices
             hits = batch.policy.gather(1, actions) > 0
-            return {"cases": len(rows), "certified_top1": hits[:, 0].float().mean().item(),
-                    "certified_top3": hits.any(dim=1).float().mean().item(),
-                    "value_mse": ((values - batch.value) ** 2).mean().item(),
-                    "mean_value": values.mean().item()}
+            enabled = torch.tensor([row.policy_enabled for row in rows],
+                                   dtype=torch.bool, device=device)
+            value_error = (values - batch.value).square()
+            wins = int(enabled.sum())
+            def optional_mean(values):
+                return values.mean().item() if values.numel() else None
+            return {"cases": len(rows),
+                    "certified_top1": optional_mean(hits[enabled, 0].float()),
+                    "certified_top3": optional_mean(hits[enabled].any(dim=1).float()),
+                    "value_mse": value_error.mean().item(), "mean_value": values.mean().item(),
+                    "win_cases": wins, "loss_cases": len(rows) - wins,
+                    "win_value_mse": optional_mean(value_error[enabled]),
+                    "loss_value_mse": optional_mean(value_error[~enabled])}
     finally:
         for module, flag in flags:
             module.training = flag

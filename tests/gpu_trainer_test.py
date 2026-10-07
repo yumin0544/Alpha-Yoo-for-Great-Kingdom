@@ -132,8 +132,12 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         source = self.path / "current.pt"
         trainer.save_checkpoint(source)
         payload = torch.load(source, map_location="cpu", weights_only=True)
-        self.assertEqual(payload["checkpoint_version"], 7)
+        self.assertEqual(payload["checkpoint_version"], 8)
         payload["checkpoint_version"] = 1
+        payload.pop("training_budget_history")
+        payload["progress"].pop("normal_training_steps")
+        for field in loop._ADAPTIVE_CONFIG_KEYS:
+            payload["config"].pop(field)
         payload.pop("online_tactical_replay")
         for field in loop._ONLINE_CONFIG_KEYS:
             payload["config"].pop(field)
@@ -171,7 +175,7 @@ class GpuTrainingConfigurationTest(EqualityMixin, unittest.TestCase):
         damaged["checkpoint_version"] = 1
         variants.append(damaged)  # New settings must not be silently accepted as v1.
         damaged = copy.deepcopy(original)
-        damaged["checkpoint_version"] = 8
+        damaged["checkpoint_version"] = 9
         variants.append(damaged)
         for index, damaged in enumerate(variants):
             torch.save(damaged, target)

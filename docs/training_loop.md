@@ -22,7 +22,9 @@
 
 한 번의 반복은 다음 단계로 구성된다.
 
-1. 현재 기준 모델인 `champion`으로 지정한 수의 PUCT 자가 대국을 끝까지 진행한다.
+1. `self_play_model`로 선택한 모델로 지정한 수의 PUCT 자가 대국을 끝까지 진행한다.
+   기본값은 현재 기준 모델인 `champion`이며, `learner`를 선택하면 반복 시작 시
+   최신 후보 가중치를 고정한 사본을 사용한다.
 2. 착수 전 상태, 탐색 방문 비율, 최종 승패 목표를 FIFO 자료 버퍼에 넣는다.
 3. `online_tactics`를 켰으면 새 대국의 일부 위치를 깊게 읽고, 증명한 전술을
    별도 FIFO 버퍼에 저장한다. 기본값은 꺼짐이다.
@@ -33,8 +35,12 @@
 7. 완료한 반복의 모델, 두 버퍼, optimizer, 난수와 진행 횟수를 저장하고 지표를 기록한다.
 
 승격되지 않아도 `learner`와 Adam 상태는 다음 반복으로 이어진다.
-자가 대국에 사용하는 모델은 평가를 통과한 `champion`이다. 따라서 후보를
+기본 자가 대국에 사용하는 모델은 평가를 통과한 `champion`이다. 후보를
 거부할 때마다 학습된 가중치와 optimizer를 초기화하지 않는다.
+`--self-play-model learner`는 승격되지 않은 최신 후보로도 다음 자료를 만들게
+하는 선택이다. 한 반복의 자료 생성 중 가중치를 갱신하지 않으며, 평가 상대·
+승격 기준·`best.pt`의 의미는 바꾸지 않는다. 기존 실행과 버전 1~7 재개는
+이 옵션을 명시적으로 바꾸지 않으면 `champion`을 사용한다.
 
 CPU 자가 대국은 매 판, GPU 자가 대국은 매 배치 새로운 시드를 사용한다.
 기본적으로 루트 Dirichlet 잡음과
@@ -46,8 +52,9 @@ GPU 경로는 한 번에 최대 `self_play_batch_size`판을 진행하며 배치
 대국이 종료된 뒤 다음 배치를 시작한다. 착수 전 입력·합법 수·방문 정책과
 최종 승패를 기존 `GameData` 형식의 CPU 자료로 회수해 FIFO 버퍼에 저장한다.
 방문 정책은 온도를 적용하기 전의 탐색 방문 비율이고, 온도는 실제 착수의
-추출 확률에만 적용한다. 매 자료 수집 호출에서 현재 `champion`의 가중치로
-GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국에 반영된다.
+추출 확률에만 적용한다. 매 자료 수집 호출에서 선택한 모델의 고정된 가중치로
+GPU 탐색기를 만든다. 기본 `champion`이면 승격된 모델이 다음 반복에 반영되고,
+`learner`면 직전 반복까지 학습한 최신 후보가 다음 자료를 만든다.
 
 ## 짧게 실행하기
 
@@ -63,7 +70,7 @@ GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국�
 학습 품질이나 기력 향상의 증거로 사용하지 않는다. `--iterations`는 **이번
 실행에서 추가로 수행할 반복 수**이며 총 목표 반복 수가 아니다.
 
-출력 디렉토리에 이미 `latest.pt`, `best.pt` 또는 `metrics.jsonl`이 있으면
+출력 디렉토리에 이미 `latest.pt`, `best.pt`, `candidate.pt` 또는 `metrics.jsonl`이 있으면
 새 실행은 오류로 끝난다. 기존 실행을 이어가려면 `--resume`을 사용한다.
 
 ```powershell
@@ -78,8 +85,11 @@ GPU 탐색기를 만들어, 승격된 모델이 다음 반복의 자가 대국�
 `--resume`과 함께 사용할 수 없고 optimizer, 버퍼와 진행 횟수는 이어받지 않는다.
 허용된 학습 설정을 바꾸려면 `--resume --reconfigure`와 기존 학습 파일이 없는
 새 `--output`을 사용한다. `--prepare-only`를 더하면 실제 대국 전에 변경된
-전체 상태만 저장할 수 있다. 사이클당 판수·갱신 수·일반 replay 용량은 변경할
+전체 상태만 저장할 수 있다. 사이클당 판수·일반 replay 용량·초기 seed는 변경할
 수 없고, 이미 채운 온라인 전술 replay의 용량 변경도 거부한다.
+버전 8부터는 `--train-steps`로 향후 반복의 갱신 수를 변경할 수 있다.
+과거 갱신 수는 수정하지 않고 구간별 학습 예산을 저장·검증한다. actor 변경도
+학습 설정 변경이므로 `--self-play-model learner`에는 같은 절차가 필요하다.
 
 ## GPU 자가 대국과 학습 시작하기
 
@@ -204,6 +214,7 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--output` | `runs/rl` | 저장 파일과 지표를 기록할 디렉토리 |
 | `--games-per-iteration` | 4 | 한 반복의 완료 자가 대국 수 |
 | `--self-play-backend` | `cpu` | `cpu`: 기존 C++ 순차 대국; `cuda`: GPU 규칙·배치 PUCT |
+| `--self-play-model` | `champion` | 자료 생성 모델; `learner`는 반복 시작 때 최신 후보 사본 고정 |
 | `--self-play-batch-size` | 128 | CUDA 경로에서 동시에 진행할 최대 대국 수 |
 | `--simulations` | 128 | 자가 대국의 매 수 PUCT 탐색 횟수 |
 | `--c-puct` | 1.5 | PUCT 탐색 계수 |
@@ -227,6 +238,7 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--device` | `cpu` | PyTorch 추론과 학습 장치 |
 | `--threads` | 1 | CLI 실행의 PyTorch CPU 스레드 수 |
 | `--online-tactics` | 꺼짐 | 새 자가 대국의 일부 위치를 깊게 증명하고 미니배치에 혼합 |
+| `--online-tactics-include-loss` | 꺼짐 | 새 LOSS 증명을 가치 전용 자료로 수집; 정책 손실 0, 기존 자료는 유지 |
 | `--online-tactics-max-cases` | 32 | 사이클당 확인할 CPU 전술 위치 상한 |
 | `--online-tactics-max-depth` | 9 | 양쪽 착수를 합친 증명 깊이(ply) |
 | `--online-tactics-max-nodes` | 2,000,000 | 위치당 증명 탐색 노드 상한 |
@@ -259,16 +271,30 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 ## 온라인 장기 전술을 학습 루프에 연결하기
 
 `--online-tactics`는 매 사이클 생성한 대국에서 일부 비종료 위치를 뽑고,
-실제 착수 기록으로 재현하여 깊은 CPU 증명 탐색을 수행한다. 현재 플레이어의
-승리가 확정된 위치 중 최소 증명 길이 조건을 만족한 것만 별도 전술 FIFO에
-저장한다. 증명된 승리 수를 정책 목표로, `+1`을 가치 목표로 사용한다.
+실제 착수 기록으로 재현하여 깊은 CPU 증명 탐색을 수행한다. 기본적으로 현재
+플레이어의 승리가 확정된 위치 중 최소 증명 길이 조건을 만족한 것만 별도
+전술 FIFO에 저장한다. 증명된 승리 수를 정책 목표로, `+1`을 가치 목표로 사용한다.
 `UNKNOWN`을 안전·패배·무승부 라벨로 바꾸지 않으며 `LOSS`도 임의의 정책
 정답으로 채택하지 않는다. 실제 대국에서 관찰한 승패 목표는 일반 replay에
 그대로 유지한다.
 
+`--online-tactics-include-loss`를 켜면 새로 완전히 증명된 `LOSS`도 가치 `-1`로
+채택한다. 이 표본의 `policy_enabled=False`이므로 정책 손실은 0이다.
+패배 증명의 주 수순을 좋은 방어 수로 오인하여 가짜 정책 정답을 만들지 않는다.
+포획 위협에 대한 반격이 실제 승리로 증명되면 `WIN`의 승리 수로 정책을 학습한다.
+`UNKNOWN`과 미완료 증명은 이 옵션에서도 제외한다. 저장 형식을 위한 LOSS 정책
+배열은 학습하지 않는 placeholder이며, 무작위 방어 정답이 아니다.
+이 옵션은 **새 자료 수집**만 바꾼다. `--no-online-tactics-include-loss`로 꺼도
+이미 저장한 LOSS를 지우거나 표본 추출에서 제외하지 않으며, 재개 시 같은
+증명 버퍼를 유지한다. 기존 WIN-only 증명 replay는 정책 활성·가치 `+1`로
+복원한다. WIN-only 대조군은 LOSS가 없는 공통 원본에서 별도로 분기해야 한다.
+
 일반 replay와 증명 replay는 분리되어 있으므로 전술 위치가 기존 전략 자료를
 밀어내지 않는다. 증명 버퍼가 있으면 기본적으로 미니배치의 25%를 전술에서,
-75%를 일반 replay에서 복원추출한다. 증명 위치가 아직 없으면 원래 미니배치로
+75%를 일반 replay에서 복원추출한다. `--online-tactics-fraction 0.05`로 5%를
+선택할 수 있으며 기본 25%를 자동으로 변경하지 않는다. 미니배치 512개에서는
+반올림한 26개가 전술, 486개가 일반 표본이므로 실제 비율은 약 5.08%다.
+증명 위치가 아직 없으면 원래 미니배치로
 학습한다. 새 정답을 못 찾은 사이클도 이전 증명 자료를 계속 사용할 수 있다.
 설정한 `--train-steps` 안에서 혼합하므로 사이클당 Adam 갱신 수는 증가하지
 않는다. 전술 자료에는 회전·반사를 적용하기 전의 원본 증명도 함께 저장한다.
@@ -278,6 +304,8 @@ PUCT 예산, CUDA의 기존 얕은 검사, 평가 예산과 champion 승격 기�
 새 긴 강제 승리 문제를 매 사이클 발견한다고 보장하지 않으며 추가 CPU 시간도
 필요하다. 자세한 안전 조건·옵션·실행 방법은
 [증명 기반 전술 학습](tactical_curriculum.md#매-사이클-새로운-전술을-계산하여-학습하기)에 있다.
+같은 체크포인트에서 25%/5%·갱신 수·actor를 단계별로 비교하는 명령과
+판정 기준은 [정체 구간 비교 실험](plateau_experiments.md)에 있다.
 
 기존 v6 전술 보강 체크포인트에서 설정만 준비하는 예시다. 원본을 덮어쓰지 않는다.
 
@@ -307,9 +335,14 @@ PUCT 예산, CUDA의 기존 얕은 검사, 평가 예산과 champion 승격 기�
 | --- | --- | --- |
 | `latest.pt` | learner와 champion, Adam, 일반·증명 버퍼, 설정, 진행 횟수, 난수 상태 | `Trainer.load_checkpoint` / `--resume` |
 | `best.pt` | 현재 champion의 스키마·모델 구성·가중치 | 기존 `load_model` |
+| `candidate.pt` | 마지막 완료 반복의 최신 learner; 승격 여부와 무관 | 기존 `load_model` |
 | `metrics.jsonl` | 완료한 반복마다 한 줄의 JSON 지표 | 일반 JSON Lines 도구 |
 
 저장한 `best.pt`와 사람이 직접 대국하려면 `examples/play_ai.py`를 사용한다.
+최신 학습 후보와 직접 대국하려면 같은 프로그램에 `candidate.pt`를 지정한다.
+CLI는 매 반복 완료 후 두 추론용 파일을 별도로 내보내며, `--prepare-only`에서도
+전체 상태 저장 후 현재 두 모델을 내보낸다. `candidate.pt`를 `best.pt`로 이름만
+바꾸는 것으로 champion 승격이나 Adam·버퍼 재개를 대신하지 않는다.
 현재 저장 자료의 위치와 범위, CPU·CUDA 대국 실행과 입력 방법은
 [직접 대국 안내](play_ai.md)에 기록한다.
 
@@ -317,16 +350,26 @@ PUCT 예산, CUDA의 기존 얕은 검사, 평가 예산과 champion 승격 기�
 복원 API로 읽지 않는다. 전체 체크포인트는 `weights_only=True`로 읽고 입력
 스키마, 가중치·Adam·버퍼·진행 횟수·난수 상태의 일관성을 검증한다.
 
-현재 전체 체크포인트는 버전 7이다. 버전 1~6도 읽는다. 버전 1~5 파일에 없는
+현재 전체 체크포인트는 버전 8이다. 버전 1~7도 읽는다. 버전 1~5 파일에 없는
 `tactical_training_steps`는 0으로, 버전 1~6에 없는 온라인 전술 설정·증명
 버퍼는 꺼짐·빈 버퍼로 복원한다. 버전 7은 `online_tactical_replay`에 증명
 자료·메타데이터를 별도로 저장하고 복원 시 검증한다. 버전 6에서 도입한 완료
-사이클 외 증명 기반 전술 갱신 카운터도 유지한다. 진행 횟수 검증식은 다음과 같다.
+사이클 외 증명 기반 전술 갱신 카운터도 유지한다. 버전 8은 actor·LOSS 채택 설정과
+`training_budget_history`를 추가하고, 일반/혼합 갱신 누계인
+`normal_training_steps`를 별도로 검증한다. 진행 횟수 검증식은 다음과 같다.
 
 ```text
 self_play_games = iteration × games_per_iteration
-training_steps = iteration × train_steps_per_iteration + tactical_training_steps
+normal_training_steps = Σ (각 구간의 완료 반복 수 × 해당 구간 train_steps_per_iteration)
+training_steps = normal_training_steps + tactical_training_steps
 ```
+
+예산 이력의 각 항목은 `start_iteration`과 `train_steps_per_iteration`을 갖는다.
+완료 515사이클 경계에서 128회에서 256회로 바꾸면
+`[{start_iteration: 0, train_steps_per_iteration: 128},
+{start_iteration: 515, train_steps_per_iteration: 256}]`을 저장한다.
+새 516사이클 완료 시 일반 갱신 누계는 `515 × 128 + 256`이다. 버전 1~7은
+저장된 단일 예산의 시작 구간을 복원하므로 과거 진행·Adam 상태를 임의로 바꾸지 않는다.
 
 `training_steps`는 실제 전체 Adam 갱신 수이고 `tactical_training_steps`는 그중
 추가 전술 갱신 수다. 전술 보강으로 자가 대국 판수·완료 사이클·champion 버전을
@@ -391,6 +434,13 @@ worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 �
 `replay_rows_per_batch`, 실제 teacher 시간 `seconds`가 들어간다. CLI에도
 채택 수·버퍼·혼합 비율·시간을 출력한다. 증명 위치 채택 수가 곧 전체 기력
 향상이나 장기 전술 일반화 성능을 의미하지 않는다.
+새 지표 스키마 3은 `normal_training_steps`, 자료 생성 모델인 `self_play_model`,
+실제로 사용한 actor의 역할·경계 반복·갱신 수·champion 버전·가중치 해시를 담은
+`self_play_actor`를 추가한다. 혼합 학습은 일반/teacher 정책·가치 손실을 따로
+기록하고, teacher의 WIN/LOSS 가치 손실·표본 수와 흑백별 가치 오차도 구분한다.
+전체 정책 손실은 LOSS 표본의 기여를 0으로 두고 전체 미니배치 행 수로 나눈다.
+WIN 행만으로 다시 평균내어 WIN 정책의 가중치를 임의로 키우지 않는다.
+25%와 5%는 손실의 혼합 구성 자체가 다르므로 합산 loss만으로 기력을 비교하지 않는다.
 `self_play_backend`와 `self_play_batch_size`는 실행 경로와 설정을 나타낸다.
 `self_play_games_per_second`는 이번 완료 판수를 자료 생성 시간으로 나눈 값,
 `iteration_games_per_second`는 같은 판수를 학습·평가까지의 전체 반복 시간으로
@@ -418,7 +468,7 @@ worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 �
 알 수 있으므로 같은 체크포인트 내부의 `last_metrics`에는 포함하지 않는다.
 `elapsed_seconds`는 자가 대국·온라인 teacher·학습·평가를 포함한 반복 계산
 시간이다. 온라인 경로가 꺼져 있으면 teacher 계산은 없다.
-`elapsed_with_checkpoint_seconds`도 JSONL append와 callback의 `best.pt` export
+`elapsed_with_checkpoint_seconds`도 JSONL append와 callback의 `best.pt`·`candidate.pt` export
 시간은 포함하지 않으므로 전체 체감 wall-clock과 동일하다고 간주하지 않는다.
 
 기존 및 새 지표 파일은 체크포인트를 읽지 않는 분석기로 함께 요약한다.
@@ -433,10 +483,10 @@ worker는 평가 판수로 제한된다. 동일 worker의 CPU split-resume와 �
 간주하지 않고 기록 범위를 따로 표시한다. `--json`으로 기계 판독 결과를 얻는다.
 
 CLI의 일반 학습 실행은 `Trainer.run()`의 시작 경계 저장만 사용한다. 이 저장이
-완료된 뒤 대국을 시작하고, `best.pt`는 첫 반복 완료 후 callback에서 내보낸다.
-따라서 초기 저장 실패 때 `best.pt`만 남지 않으며, 이전처럼 같은 대형
+완료된 뒤 대국을 시작하고, `best.pt`·`candidate.pt`는 첫 반복 완료 후 callback에서
+내보낸다. 따라서 초기 저장 실패 때 추론용 모델만 남지 않으며, 이전처럼 같은 대형
 `latest.pt`를 실행 직전에 두 번 연속 저장하지 않는다. `--prepare-only`도
-`latest.pt`를 먼저 저장한 뒤 `best.pt`를 내보낸다.
+`latest.pt`를 먼저 저장한 뒤 `best.pt`·`candidate.pt`를 내보낸다.
 
 ### 사이클당 판수와 replay 용량 조정 기준
 
@@ -458,8 +508,9 @@ CLI의 일반 학습 실행은 `Trainer.run()`의 시작 경계 저장만 사용
 
 평가 비용을 분산하려고 사이클당 판수를 4,096로 늘리는 실험은 가능하지만,
 기준 모델 갱신이 절반 빈도로 늦어지고 같은 비율을 유지하려면 학습 step과
-버퍼도 함께 조정해야 한다. 현재 체크포인트는 판수·step·용량 변경을 재개 중에
-허용하지 않는다. 병렬 평가는 축소 A/B에서 12 worker가 순차보다 2.72배
+버퍼도 함께 조정해야 한다. 현재 체크포인트는 판수·일반 버퍼 용량 변경을 재개
+중에 허용하지 않는다. 갱신 수만 바꾸는 경우에는 버전 8의 구간별 예산 검증으로
+`--reconfigure --train-steps`를 사용할 수 있다. 병렬 평가는 축소 A/B에서 12 worker가 순차보다 2.72배
 빨랐으므로 먼저 2,048판 설정을 유지한 채 실제 128회 탐색 사이클의 새 처리량과
 기력 지표를 측정한다. 그 뒤 4,096판을 독립 A/B 실행으로 비교한다. 단순히
 1,024판으로 줄이면 고정 평가 비중이 커질 수 있어 속도 최적화의 기본값으로
@@ -497,6 +548,7 @@ config = TrainingConfig(
 trainer = Trainer(config, device="cpu", evaluation_workers=4)
 trainer.run(1, checkpoint_path="runs/api/latest.pt", metrics_path="runs/api/metrics.jsonl")
 trainer.export_champion("runs/api/best.pt")
+trainer.export_learner("runs/api/candidate.pt")
 
 resumed = Trainer.load_checkpoint("runs/api/latest.pt", device="cpu")
 resumed.run(1, checkpoint_path="runs/api/latest.pt", metrics_path="runs/api/metrics.jsonl")
@@ -589,3 +641,13 @@ GPU 통합 검증은 기존 CPU 엔진과 착수 기록·입력·정책·최종 
   주입한 네 경우 모두 `best.pt`만 남지 않았고, 초기 중단 안내가 올바르다.
 - 프로젝트 가상환경을 오프라인으로 갱신하고 설치된 패키지의 새 API와 지표
   분석기를 실행했다. `engine/` 파일은 변경하지 않았다.
+
+### actor·갱신 예산·후보 내보내기 CLI 검증: 2026-10-07
+
+`tests/plateau_cli_test.py`의 12개 사례가 통과했다. 새 actor·LOSS 수집 옵션과
+5% 혼합·256회 갱신의 전달, 재개 설정 변경에 `--reconfigure` 필수, 후보 파일만
+있는 기존 출력의 보호, 승격 실패에도 candidate 내보내기, 최초 저장 실패 시
+추론용 모델을 내보내지 않는 동작을 검사했다. 실제 작은 CPU 체크포인트도
+`--prepare-only`로 생성·설정 변경·복원하여 학습 횟수 0, 변경한 예산 이력·actor·
+학습률과 원본 파일 보존을 확인했다. 이 CLI 검증에서는 대국·학습을 실행하지 않았고,
+성능이나 기력 개선 실측을 의미하지 않는다. `engine/`는 변경하지 않았다.
