@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from kingdom_ai.metrics import load_metric_rows, summarize_metrics
+from kingdom_ai.metrics import compact_metric_row, load_metric_rows, summarize_metrics
 
 
 def row(iteration, *, samples=200, games=10, self_play=2.0, elapsed=5.0):
@@ -38,6 +38,40 @@ def row(iteration, *, samples=200, games=10, self_play=2.0, elapsed=5.0):
 
 
 class MetricsTest(unittest.TestCase):
+    def test_compact_teacher_records_preserves_counts_without_mutating_source(self):
+        full = row(1)
+        full["online_tactics"] = {"enabled": True, "added_samples": 2, "max_depth": 20,
+            "records": [
+                {"outcome": "WIN", "proof_depth": 9, "training_label": True,
+                 "actor": "Black", "motif": "capture", "position": {"history": [[1, 2]]}},
+                {"outcome": "LOSS", "proof_depth": 8, "training_label": True,
+                 "actor": "White", "motif": "defense"},
+                {"outcome": "LOSS", "proof_depth": 2, "training_label": False,
+                 "excluded": "proof_shorter_than_minimum_depth"},
+                {"outcome": "UNKNOWN", "proof_depth": 0, "training_label": False,
+                 "budget_exhausted": True},
+            ]}
+        saved = json.dumps(full)
+        compact = compact_metric_row(full)
+        self.assertEqual(json.dumps(full), saved)
+        self.assertNotIn("records", compact["online_tactics"])
+        summary = compact["online_tactics"]["record_summary"]
+        self.assertEqual(summary["records"], 4)
+        self.assertEqual(summary["outcomes"], {"WIN": 1, "LOSS": 2, "UNKNOWN": 1})
+        self.assertEqual(summary["accepted"], {"WIN": 1, "LOSS": 1})
+        self.assertEqual(summary["accepted_proof_depths"], {"WIN": {"9": 1}, "LOSS": {"8": 1}})
+        self.assertEqual(summary["budget_exhausted"], {"UNKNOWN": 1})
+        self.assertEqual(summary["accepted_actors"], {"WIN": {"Black": 1}, "LOSS": {"White": 1}})
+        self.assertEqual(summary["exclusion_reasons"], {"proof_shorter_than_minimum_depth": 1})
+        self.assertEqual(summarize_metrics([full]), summarize_metrics([compact]))
+        self.assertEqual(compact_metric_row(compact), compact)
+
+    def test_compaction_keeps_ordinary_and_empty_teacher_rows_compatible(self):
+        normal = row(1)
+        self.assertEqual(compact_metric_row(normal), normal)
+        normal["online_tactics"] = {"enabled": False, "records": []}
+        self.assertEqual(compact_metric_row(normal), normal)
+
     def test_old_and_new_rows_are_summarized_and_duplicates_use_last(self):
         old = row(1)
         duplicate = row(1, samples=100, games=10, self_play=1.0)

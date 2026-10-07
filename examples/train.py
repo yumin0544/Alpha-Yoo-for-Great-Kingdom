@@ -4,8 +4,13 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import sys
 
 import torch
+
+# Use this checkout's logging/config changes even if an older wheel is installed.
+# The native my_board_engine extension still comes from the existing environment.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from kingdom_ai import PolicyValueNet, Trainer, TrainingConfig, load_model
 

@@ -419,5 +419,6 @@ Windows에서 저장소의 `PlayGreatKingdom.cmd`를 더블클릭하면 게임 �
 - [Neural PUCT search and self-play data (한국어)](docs/puct_design.md)
 - [CUDA game rules and batched PUCT search (한국어)](docs/gpu_puct.md)
 - [Repeated learning, evaluation, and resume (한국어)](docs/training_loop.md)
+- [Run storage cleanup, compact logs, and recovery (한국어)](docs/run_cleanup.md)
 - [Play a saved model as a human (한국어)](docs/play_ai.md)
 - [Online game](https://worldsstone.com)

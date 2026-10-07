@@ -4,8 +4,51 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter, defaultdict
+from copy import deepcopy
 from pathlib import Path
 from statistics import median
+
+
+def compact_metric_row(row):
+    """Keep learning metrics, replacing duplicated teacher histories with counts.
+
+    The caller's iteration/checkpoint payload is untouched. Full accepted proof
+    certificates remain in the certified replay; this is only a JSONL view.
+    """
+    compact = deepcopy(row)
+    report = compact.get("online_tactics")
+    if not isinstance(report, dict) or not report.get("records"):
+        return compact
+    records = report.pop("records")
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ValueError("Online tactics records must be a list of objects")
+    outcomes, accepted, exhausted, reasons = Counter(), Counter(), Counter(), Counter()
+    depths, accepted_depths = defaultdict(Counter), defaultdict(Counter)
+    motifs, actors = defaultdict(Counter), defaultdict(Counter)
+    for record in records:
+        outcome = record.get("outcome", "UNKNOWN")
+        depth = str(record.get("proof_depth", 0))
+        outcomes[outcome] += 1
+        depths[outcome][depth] += 1
+        if record.get("budget_exhausted", False):
+            exhausted[outcome] += 1
+        reason = record.get("excluded") or record.get("excluded_reason")
+        if reason:
+            reasons[reason] += 1
+        if record.get("training_label", False):
+            accepted[outcome] += 1
+            accepted_depths[outcome][depth] += 1
+            motifs[outcome][record.get("motif", "unknown")] += 1
+            actors[outcome][record.get("actor", "unknown")] += 1
+    report["record_summary"] = {
+        "records": len(records), "outcomes": dict(outcomes),
+        "accepted": dict(accepted), "proof_depths": dict(depths),
+        "accepted_proof_depths": dict(accepted_depths),
+        "accepted_motifs": dict(motifs), "accepted_actors": dict(actors),
+        "budget_exhausted": dict(exhausted), "exclusion_reasons": dict(reasons),
+    }
+    return compact
 
 
 def load_metric_rows(path) -> tuple[list[dict], int]:

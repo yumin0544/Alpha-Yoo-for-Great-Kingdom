@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import importlib
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -114,6 +115,26 @@ class OnlineTacticsLoopTest(unittest.TestCase):
         self.assertEqual(second["online_tactics"]["added_samples"], 0)
         self.assertEqual(second["online_tactics"]["mixed_updates"], 2)
         self.assertEqual(trainer.training_steps, 4)
+
+    def test_file_log_is_compact_but_callback_return_and_checkpoint_keep_full_records(self):
+        trainer = self.trainer()
+        completed = self.run_mock(trainer, [teacher()])
+        seen = []
+        fixture_root = Path(__file__).resolve().parents[1] / "runs"
+        with tempfile.TemporaryDirectory(prefix="compact_log_test_", dir=fixture_root) as directory:
+            checkpoint, log = Path(directory) / "latest.pt", Path(directory) / "metrics.jsonl"
+            with patch.object(trainer, "run_iteration", return_value=deepcopy(completed)):
+                returned = trainer.run(1, checkpoint_path=checkpoint, metrics_path=log,
+                                       on_iteration=seen.append)
+            written = json.loads(log.read_text(encoding="utf-8"))
+            self.assertNotIn("records", written["online_tactics"])
+            self.assertEqual(written["online_tactics"]["record_summary"]["records"], 3)
+            self.assertEqual(returned[0]["online_tactics"]["records"], completed["online_tactics"]["records"])
+            self.assertEqual(seen[0]["online_tactics"]["records"], completed["online_tactics"]["records"])
+            restored = Trainer.load_checkpoint(checkpoint)
+            self.assertEqual(restored._last_metrics["online_tactics"]["records"],
+                             completed["online_tactics"]["records"])
+            self.assertEqual(len(restored.online_tactical_replay), 1)
 
     def test_disabled_teacher_never_mines_solves_or_mixes(self):
         trainer = Trainer(replace(self.trainer().config, online_tactics=False),

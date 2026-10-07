@@ -954,10 +954,12 @@ class Trainer:
             # operational fields therefore live in JSONL/return/callback data;
             # checkpoint last_metrics remains the resumable iteration payload.
             if metrics_path is not None:
+                from .metrics import compact_metric_row
                 target = Path(metrics_path)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with target.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(metrics, ensure_ascii=False, allow_nan=False) + "\n")
+                    handle.write(json.dumps(compact_metric_row(metrics), ensure_ascii=False,
+                                            allow_nan=False, separators=(",", ":")) + "\n")
                     handle.flush()
             if on_iteration is not None:
                 on_iteration(deepcopy(metrics))
