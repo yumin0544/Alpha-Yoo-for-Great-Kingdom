@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Great Kingdom · 플레이</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231b5145'/%3E%3Cpath d='M16 43V23l10 10 6-16 6 16 10-10v20z' fill='%23edcf96'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Great Kingdom 홈"><span class="brand-mark">♜</span><span>GREAT KINGDOM<small>A LITTLE BOARD. A GREAT KINGDOM.</small></span></a>
+    <div class="header-right"><span class="local-badge"><i></i> 로컬 대국</span><button class="text-button" id="help-open">플레이 방법 <span>↗</span></button></div>
+  </header>
+  <main>
+    <section class="play-area" aria-label="게임">
+      <div class="section-heading"><div><p class="eyebrow">YOUR NEXT MOVE</p><h1>한 수씩, 나의 왕국을.</h1></div><span class="board-size">9 × 9</span></div>
+      <div class="players">
+        <div class="player-card black-card" id="black-card"><span class="player-stone black"></span><div><strong id="black-name">나</strong><small>파랑 · 선공</small></div><div class="player-count"><strong id="black-remaining">41</strong><small>남은 돌</small></div></div>
+        <span class="versus">vs</span>
+        <div class="player-card white-card" id="white-card"><span class="player-stone white"></span><div><strong id="white-name">AI</strong><small>주황 · 후공</small></div><div class="player-count"><strong id="white-remaining">41</strong><small>남은 돌</small></div></div>
+      </div>
+      <div class="board-shell">
+        <div class="board" id="board" role="group" aria-label="9행 9열 게임 보드">
+          <svg class="grid" id="grid" viewBox="0 0 1000 1000" aria-hidden="true"></svg>
+          <div id="points"></div>
+        </div>
+      </div>
+      <div class="board-footer"><span><i class="territory-dot blue"></i> 파랑의 집 <i class="territory-dot orange"></i> 주황의 집</span><span>◇ 중앙 중립 돌 <span class="footer-separator">·</span> <span id="move-count">0수</span></span></div>
+    </section>
+    <aside class="sidebar" aria-label="대국 정보와 설정">
+      <section class="turn-panel" id="turn-panel" aria-live="polite">
+        <p class="eyebrow" id="turn-eyebrow">READY TO PLAY</p><h2 id="turn-title">보드를 준비하고 있어요</h2><p id="turn-description">잠시만 기다려 주세요.</p>
+        <div class="turn-actions"><button class="primary-button" id="pass-button" disabled>이번 차례 패스 <span>→</span></button><button class="icon-button" id="restart-button" title="현재 설정으로 새 게임" aria-label="새 게임">↻</button></div>
+      </section>
+      <section class="score-panel"><div class="panel-heading"><h3>나의 영역</h3><span>확정된 빈 집</span></div><div class="score-values"><div><span class="color-label"><i class="blue"></i> 파랑</span><strong id="black-score">0<small>칸</small></strong></div><span class="score-divider"></span><div><span class="color-label"><i class="orange"></i> 주황</span><strong id="white-score">0<small>칸</small></strong></div></div><p class="score-note">연속 패스 시 파랑이 3칸 이상 앞서면 승리</p></section>
+      <section class="settings-panel"><div class="panel-heading"><h3>대국 설정</h3><span>새 게임에 적용</span></div>
+        <form id="settings-form">
+          <div class="mode-selector" role="group" aria-label="대국 방식"><button type="button" data-mode="human_ai" class="selected" aria-pressed="true">사람 vs AI</button><button type="button" data-mode="human_human" aria-pressed="false">두 사람</button></div>
+          <div class="setting-row" id="color-row"><label for="human-select">내 돌</label><select id="human-select"><option value="Black">파랑 · 선공</option><option value="White">주황 · 후공</option></select></div>
+          <div class="setting-field" id="model-row"><label for="model-select">상대 AI</label><select id="model-select"><option value="mcts">기본 AI · 모델 없이 시작</option></select></div>
+          <div class="setting-pair" id="ai-row"><div><label for="simulations-select">AI 생각량</label><select id="simulations-select"><option value="16">가볍게 · 16회</option><option value="64" selected>기본 · 64회</option><option value="128">깊게 · 128회</option><option value="512">더 깊게 · 512회</option></select></div><div><label for="device-select">추론 장치</label><select id="device-select"><option value="cpu">CPU</option><option value="cuda">GPU</option></select></div></div>
+          <button class="outline-button" type="submit" id="start-button">이 설정으로 새 게임 <span>↗</span></button>
+        </form>
+      </section>
+      <section class="history-panel"><div class="panel-heading"><h3>최근 수순</h3><span id="history-label">대국 시작</span></div><ol id="history"><li class="history-empty">첫 돌을 놓아 보세요.</li></ol></section>
+      <p class="side-note">상대 돌을 포위하면 즉시 승리합니다.<br>완성된 집에는 돌을 놓을 수 없습니다.</p>
+    </aside>
+  </main>
+  <footer class="page-footer"><span>GREAT KINGDOM</span><span>작은 판 위에 펼쳐지는 나의 왕국</span></footer>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <dialog id="help-dialog"><div class="dialog-heading"><span class="eyebrow">HOW TO PLAY</span><button class="icon-button" id="help-close" aria-label="도움말 닫기">×</button></div><h2>클릭 한 번으로,<br>새로운 한 수.</h2><p>빈 교차점을 클릭하거나 키보드로 이동해 Enter를 눌러 돌을 놓습니다. 파랑이 먼저, 주황이 다음에 둡니다.</p><div class="rule-list"><p><strong>영역을 만들기</strong>돌·가장자리·중립 돌로 빈칸을 둘러싸면 집이 됩니다. 완성된 집에는 누구도 놓을 수 없습니다.</p><p><strong>상대 돌을 포위하기</strong>상대 돌 무리의 마지막 빈틈을 막으면 즉시 승리합니다. 상대 포획 없이 자기 무리를 막는 자충수는 즉시 패배합니다.</p><p><strong>패스로 끝내기</strong>두 번 연속 패스하면 집을 셉니다. 파랑의 집이 주황보다 최소 3칸 많아야 파랑이 이깁니다.</p></div><p class="dialog-footnote">각자 41개의 돌 · 중앙 중립 돌은 파괴 불가</p><button class="primary-button" id="help-done">알겠어요, 시작할게요 <span>→</span></button></dialog>
+  <dialog id="restart-dialog"><p class="eyebrow">A FRESH START</p><h2>새로운 왕국을 만들까요?</h2><p>진행 중인 대국이 끝나고 선택한 설정으로 새 판을 시작합니다.</p><div class="dialog-actions"><button class="outline-button" id="restart-cancel">계속 플레이</button><button class="primary-button" id="restart-confirm">새 게임 시작</button></div></dialog>
+</body>
+</html>
