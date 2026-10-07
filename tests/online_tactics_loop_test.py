@@ -221,16 +221,37 @@ class OnlineTacticsLoopTest(unittest.TestCase):
 
     def test_remaining_global_budget_is_passed_to_each_solver(self):
         seen = []
-        options = engine.TacticalSolverOptions(max_depth=9, max_nodes=2000000, time_limit_ms=2000)
+        options = engine.TacticalSolverOptions(max_depth=20, max_nodes=2000000, time_limit_ms=2000)
         _, report = collect_certified_samples(
             [{"id": "deadline"}], options, load_position=lambda case: engine.State(),
-            solver=lambda state, bounded: (seen.append(bounded.time_limit_ms)
+            solver=lambda state, bounded: (seen.append(
+                (bounded.max_depth, bounded.max_nodes, bounded.time_limit_ms))
                 or SimpleNamespace(outcome="UNKNOWN", winning_moves=[])),
             generation_seconds=1.0, bound_remaining_time=True)
         self.assertEqual(report["excluded_unknown"], 1)
         self.assertEqual(len(seen), 1)
-        self.assertTrue(0 < seen[0] <= 1000)
+        self.assertEqual(seen[0][:2], (20, 2000000))
+        self.assertTrue(0 < seen[0][2] <= 1000)
         self.assertEqual(options.time_limit_ms, 2000)
+
+    def test_real_twenty_ply_cap_honors_tiny_node_budget_without_inventing_targets(self):
+        state = engine.State()
+        before = (state.board.cells, state.ownership, state.to_play, state.consecutive_passes)
+        options = engine.TacticalSolverOptions(max_depth=20, max_nodes=1, time_limit_ms=100)
+        samples, report = collect_certified_samples(
+            [{"id": "depth_twenty_bounded"}], options, load_position=lambda case: state,
+            generation_seconds=0.2, bound_remaining_time=True, include_loss=True)
+        self.assertEqual(samples, [])
+        self.assertEqual(report["excluded_unknown"], 1)
+        self.assertEqual(report["cases_solved"], 1)
+        record = report["records"][0]
+        self.assertEqual(record["outcome"], "UNKNOWN")
+        self.assertFalse(record["training_label"])
+        self.assertTrue(record["budget_exhausted"])
+        self.assertLessEqual(record["nodes"], 1)
+        self.assertEqual((options.max_depth, options.max_nodes, options.time_limit_ms), (20, 1, 100))
+        self.assertEqual((state.board.cells, state.ownership, state.to_play, state.consecutive_passes),
+                         before)
 
     def test_real_nine_ply_proof_is_used_by_regular_iteration(self):
         # Exact recorded self-play fixture, not a tensor-to-board reconstruction.
@@ -240,7 +261,9 @@ class OnlineTacticsLoopTest(unittest.TestCase):
         history = cases[-1]["position"]["history"] + [[6, 2]]
         actions = tuple((row - 1) * 9 + col - 1 for row, col in history)
         data = game(actions)
-        trainer = self.trainer(online_tactics_generation_seconds=5.0)
+        # Keep the original exact nine-ply proof budget explicit; the new
+        # default cap is not a promise that every position reaches depth 20.
+        trainer = self.trainer(online_tactics_max_depth=9, online_tactics_generation_seconds=5.0)
         with patch.object(trainer, "_collect_games", return_value=iter((data, data))), \
                 patch("kingdom_ai.online_tactics.TacticalPositionMiner.cases", return_value=[case]), \
                 patch.object(loop, "evaluate_models", return_value=evaluation()):

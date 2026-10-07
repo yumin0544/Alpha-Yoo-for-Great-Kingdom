@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--online-tactics-max-cases", type=positive_integer, default=None,
                         help="사이클당 CPU 전술 탐색 위치 상한 (새 학습 기본 32)")
     parser.add_argument("--online-tactics-max-depth", type=positive_integer, default=None,
-                        help="양쪽 착수를 합친 전술 증명 깊이 (새 학습 기본 9수)")
+                        help="양쪽 착수를 합친 전술 증명 최대 깊이 (새 학습 기본 20수; 재개는 저장값)")
     parser.add_argument("--online-tactics-max-nodes", type=positive_integer, default=None,
                         help="위치당 전술 증명 노드 상한 (새 학습 기본 2000000)")
     parser.add_argument("--online-tactics-time-limit-ms", type=positive_integer, default=None,

@@ -57,7 +57,7 @@ class TrainingConfig:
     self_play_fpu_reduction: float | None = None
     online_tactics: bool = False
     online_tactics_max_cases: int = 32
-    online_tactics_max_depth: int = 9
+    online_tactics_max_depth: int = 20
     online_tactics_max_nodes: int = 2000000
     online_tactics_time_limit_ms: int = 2000
     online_tactics_generation_seconds: float = 30.0

@@ -240,7 +240,7 @@ tensor 메모리를 기록한다. 파일 저장 시간은 반복 처리량에 �
 | `--online-tactics` | 꺼짐 | 새 자가 대국의 일부 위치를 깊게 증명하고 미니배치에 혼합 |
 | `--online-tactics-include-loss` | 꺼짐 | 새 LOSS 증명을 가치 전용 자료로 수집; 정책 손실 0, 기존 자료는 유지 |
 | `--online-tactics-max-cases` | 32 | 사이클당 확인할 CPU 전술 위치 상한 |
-| `--online-tactics-max-depth` | 9 | 양쪽 착수를 합친 증명 깊이(ply) |
+| `--online-tactics-max-depth` | 새 학습 20 / 재개 시 저장값 | 양쪽 착수를 합친 증명 최대 깊이(ply) |
 | `--online-tactics-max-nodes` | 2,000,000 | 위치당 증명 탐색 노드 상한 |
 | `--online-tactics-time-limit-ms` | 2,000 | 위치당 CPU 증명 시간 예산(ms) |
 | `--online-tactics-generation-seconds` | 30 | 사이클당 전술 자료 생성 시간 예산; 전체 사이클 상한은 아님 |
@@ -328,6 +328,52 @@ PUCT 예산, CUDA의 기존 얕은 검사, 평가 예산과 champion 승격 기�
 시작 옵션을 지정하지 않은 새 실행과 v1~v6의 일반 재개에서는 온라인 전술이
 꺼져 있다. 온라인 전술을 꺼도 저장된 증명 버퍼는 보존하며, 다시 켤 때 사용할
 수 있다. 끄거나 예산을 바꿀 때도 `--reconfigure`와 새 출력 폴더를 사용한다.
+
+### 온라인 전술의 최대 깊이를 20수로 변경하기
+
+2026-10-08부터 새 학습의 온라인 teacher 기본 최대 깊이는 20수(ply)다.
+흑과 백의 착수를 각각 한 수로 세므로 20수는 양쪽이 10번씩 착수하는 길이다.
+이전 실행의 설정상 최대 깊이는 9였으며, 관측된 증명 길이 8과 구분한다.
+기존 체크포인트를 옵션 없이 재개하면 저장된 깊이 9를 유지한다.
+
+기존 E 실행의 learner·champion·Adam·두 replay·진행 횟수·난수 상태를
+보존하면서 최대 깊이만 바꾸려면 새 폴더에 먼저 경계 상태를 저장한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py `
+  --resume runs\plateau-E-05pct-256-learner\latest.pt `
+  --device cuda --reconfigure --prepare-only `
+  --online-tactics-max-depth 20 `
+  --output runs\tactics-depth20-2026-10-08
+```
+
+출력 폴더에 기존 학습 파일이 있으면 이 준비 명령을 반복하지 말고 아래처럼
+준비된 파일에서 재개한다. 다음 명령은 1사이클을 실제로 추가한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\train.py `
+  --resume runs\tactics-depth20-2026-10-08\latest.pt `
+  --device cuda --iterations 1 --output runs\tactics-depth20-2026-10-08
+```
+
+이 변경은 증명 탐색의 **상한**만 높인다. 최소 증명 길이 3, 위치당
+2,000,000노드·2,000ms, 생성 구간 30초와 학습 비율·갱신 수·PUCT 예산은
+원본 E 설정을 그대로 사용한다. 모든 위치를 20수까지 완료하거나, 짧은 증명을
+20수까지 연장한다는 뜻이 아니다. 깊이 제한 minimax는 반복 심화가 아니므로
+같은 노드·시간 예산에서는 `UNKNOWN`이 늘거나 새 증명 수가 줄 수도 있다.
+`online_tactics.max_depth`, `records[].proof_depth`, `records[].budget_exhausted`와
+WIN/LOSS/UNKNOWN 수를 함께 확인한다. UNKNOWN은 여전히 정답으로 쓰지 않는다.
+
+실제 준비·검증(2026-10-08): E 원본의 완료 565사이클·자가 대국 1,157,120판·
+champion 177·Adam 78,976회 상태에서 위 새 폴더를 준비했다. 설정 차이는
+`online_tactics_max_depth: 9 → 20` 하나뿐이며, 일반 위치 131,072개·증명 위치
+476개, learner·champion·Adam·진행·예산 이력·난수·runtime·과거 지표를
+원본과 텐서 단위까지 비교해 동일함을 확인했다. 원본 전체 파일 SHA-256도
+`dd2dc62198677b21f3a9f2a81f3422e9fae05e0f9c05275ce24e1c0e92f2760f`로
+유지됐다. 새 폴더에는 `latest.pt`·`best.pt`·`candidate.pt`만 있고 추가 학습과
+`metrics.jsonl` 생성은 아직 하지 않았다. CLI 회귀 16개와 온라인 전술 회귀
+11개가 통과했다. 깊이 20에서 실제 긴 증명 수 증가나 기력 향상은 아직
+검증하지 않았으며, `engine/`와 `mcts/`는 변경하지 않았다.
 
 ## 저장 파일과 재개 범위
 

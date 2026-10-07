@@ -120,6 +120,41 @@ class PlateauCLITest(unittest.TestCase):
         self.assertIn("학습 후보 파일 (승격과 별개)", output)
         self.assertIn("추가 학습은 시작하지 않았습니다", output)
 
+    def test_new_online_training_defaults_to_twenty_ply_cap_with_existing_budgets(self):
+        code, output, error, _ = self.invoke("--prepare-only", "--online-tactics")
+        self.assertEqual(code, 0, error)
+        config = self.trainer.config
+        self.assertEqual(config.online_tactics_max_depth, 20)
+        self.assertEqual(config.online_tactics_min_proof_depth, 3)
+        self.assertEqual(config.online_tactics_max_nodes, 2000000)
+        self.assertEqual(config.online_tactics_time_limit_ms, 2000)
+        self.assertEqual(config.online_tactics_generation_seconds, 30.0)
+        self.assertIn('"online_tactics_max_depth": 20', output)
+
+    def test_resume_preserves_saved_nine_ply_cap_until_explicit_reconfigure(self):
+        self.trainer.config = replace(self.trainer.config, online_tactics=True,
+                                      online_tactics_max_depth=9)
+        code, output, error, _ = self.invoke("--resume", self.source, "--prepare-only")
+        self.assertEqual(code, 0, error)
+        self.assertIsNone(self.trainer.overrides)
+        self.assertEqual(self.trainer.config.online_tactics_max_depth, 9)
+        self.assertIn('"online_tactics_max_depth": 9', output)
+
+    def test_resume_reconfigure_forwards_only_explicit_twenty_ply_cap(self):
+        self.trainer.config = replace(self.trainer.config, online_tactics=True,
+                                      online_tactics_max_depth=9)
+        saved_config = self.trainer.config
+        saved_counters = (self.trainer.iteration, self.trainer.self_play_games)
+        code, _, error, trainer_type = self.invoke(
+            "--resume", self.source, "--reconfigure", "--prepare-only",
+            "--online-tactics-max-depth", "20")
+        self.assertEqual(code, 0, error)
+        trainer_type.load_checkpoint.assert_called_once()
+        self.assertEqual(self.trainer.overrides, {"online_tactics_max_depth": 20})
+        self.assertEqual(self.trainer.config, replace(saved_config, online_tactics_max_depth=20))
+        self.assertEqual((self.trainer.iteration, self.trainer.self_play_games), saved_counters)
+        self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
+
     def test_explicit_learner_defense_and_five_percent_are_config_fields(self):
         code, output, error, _ = self.invoke(
             "--prepare-only", "--self-play-model", "learner", "--online-tactics",
@@ -171,7 +206,8 @@ class PlateauCLITest(unittest.TestCase):
 
     def test_resume_config_override_requires_explicit_reconfigure(self):
         for option in (("--self-play-model", "learner"), ("--train-steps", "256"),
-                       ("--online-tactics-include-loss",)):
+                       ("--online-tactics-include-loss",),
+                       ("--online-tactics-max-depth", "20")):
             with self.subTest(option=option):
                 code, _, error, trainer_type = self.invoke("--resume", self.source, *option)
                 self.assertEqual(code, 2)
@@ -266,6 +302,70 @@ class PlateauCLITest(unittest.TestCase):
         self.assertFalse((first / "metrics.jsonl").exists())
         self.assertFalse((changed / "metrics.jsonl").exists())
         self.assertTrue((changed / "candidate.pt").is_file())
+
+    def test_real_nine_to_twenty_depth_prepare_preserves_all_training_state(self):
+        """Save tiny CPU checkpoints only; no games, solver or Adam update."""
+        initial = self.path / "depth_nine"
+        resumed = self.path / "depth_nine_resumed"
+        changed = self.path / "depth_twenty"
+        original_threads = torch.get_num_threads()
+        self.addCleanup(torch.set_num_threads, original_threads)
+        output = io.StringIO()
+        with patch("sys.argv", [
+                "train.py", "--device", "cpu", "--prepare-only", "--channels", "4",
+                "--residual-blocks", "0", "--games-per-iteration", "2",
+                "--simulations", "1", "--eval-games", "2", "--eval-simulations", "1",
+                "--replay-capacity", "16", "--train-steps", "2", "--batch-size", "4",
+                "--online-tactics", "--online-tactics-max-depth", "9",
+                "--output", str(initial),
+        ]), redirect_stdout(output):
+            self.assertEqual(PROGRAM.main(), 0)
+        source = initial / "latest.pt"
+        source_bytes = source.read_bytes()
+        saved = torch.load(source, weights_only=True)
+        with patch("sys.argv", [
+                "train.py", "--resume", str(source), "--device", "cpu",
+                "--prepare-only", "--output", str(resumed),
+        ]), redirect_stdout(output):
+            self.assertEqual(PROGRAM.main(), 0)
+        self.assertEqual(Trainer.load_checkpoint(resumed / "latest.pt")
+                         .config.online_tactics_max_depth, 9)
+        with patch("sys.argv", [
+                "train.py", "--resume", str(source), "--device", "cpu", "--reconfigure",
+                "--prepare-only", "--online-tactics-max-depth", "20",
+                "--output", str(changed),
+        ]), redirect_stdout(output):
+            self.assertEqual(PROGRAM.main(), 0)
+        restored = Trainer.load_checkpoint(changed / "latest.pt")
+        self.assertEqual(restored.config.online_tactics_max_depth, 20)
+        self.assertEqual(restored.config, replace(TrainingConfig(**saved["config"]),
+                                                 online_tactics_max_depth=20))
+        changed_payload = torch.load(changed / "latest.pt", weights_only=True)
+
+        def assert_same_state(left, right):
+            if isinstance(left, torch.Tensor):
+                self.assertIsInstance(right, torch.Tensor)
+                self.assertEqual(left.dtype, right.dtype)
+                self.assertTrue(torch.equal(left, right))
+            elif isinstance(left, dict):
+                self.assertEqual(set(left), set(right))
+                for key in left:
+                    assert_same_state(left[key], right[key])
+            elif isinstance(left, (list, tuple)):
+                self.assertEqual(type(left), type(right))
+                self.assertEqual(len(left), len(right))
+                for before, after in zip(left, right):
+                    assert_same_state(before, after)
+            else:
+                self.assertEqual(left, right)
+
+        for field in ("progress", "training_budget_history", "optimizer", "generator_state",
+                      "rng", "model", "champion", "replay", "online_tactical_replay", "runtime"):
+            with self.subTest(field=field):
+                assert_same_state(saved[field], changed_payload[field])
+        self.assertEqual(source.read_bytes(), source_bytes)
+        self.assertFalse(any((folder / "metrics.jsonl").exists()
+                             for folder in (initial, resumed, changed)))
 
 
 if __name__ == "__main__":

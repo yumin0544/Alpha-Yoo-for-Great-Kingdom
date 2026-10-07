@@ -200,7 +200,7 @@ teacher는 최소 증명 길이 조건을 만족하는 비종료 `WIN` 위치만
 온라인 혼합만으로 `tactical_training_steps`가 증가하지 않는다. 이 카운터는
 `train_tactics.py`로 사이클 밖에서 추가한 Adam 갱신에만 사용한다.
 
-기본 생성 예산은 사이클당 최대 32개 위치, 깊이 9수(ply), 위치당 2,000,000노드·
+기본 생성 예산은 사이클당 최대 32개 위치, 최대 깊이 20수(ply), 위치당 2,000,000노드·
 2,000ms, 생성 구간 30초다. 최소 증명 길이는 3수, 전술 버퍼 용량은 1,024개다.
 시간 예산은 엄밀한 전체 사이클 wall-clock 상한이 아니며, 위치 수집·기록 재생·
 버퍼 저장·마지막 탐색 등의 비용도 발생한다. `metrics.jsonl`에서 실제 teacher
@@ -218,7 +218,7 @@ teacher는 최소 증명 길이 조건을 만족하는 비종료 `WIN` 위치만
   --resume runs\tactics-candidate-2026-10-07\latest.pt `
   --device cuda --reconfigure --prepare-only `
   --online-tactics `
-  --online-tactics-max-cases 32 --online-tactics-max-depth 9 `
+  --online-tactics-max-cases 32 --online-tactics-max-depth 20 `
   --online-tactics-max-nodes 2000000 --online-tactics-time-limit-ms 2000 `
   --online-tactics-generation-seconds 30 --online-tactics-fraction 0.25 `
   --online-tactics-replay-capacity 1024 --online-tactics-min-proof-depth 3 `
@@ -240,6 +240,14 @@ teacher는 최소 증명 길이 조건을 만족하는 비종료 `WIN` 위치만
 `--reconfigure --no-online-tactics`를 사용한다. 설정 변경은 저장 경계에서만
 가능하며, 이미 채운 전술 FIFO의 용량을 임의로 바꾸어 자료를 버리지 않는다.
 최신 저장 형식과 재개 조건은 [반복 학습 안내](training_loop.md)에 있다.
+
+새 학습의 온라인 최대 깊이는 2026-10-08부터 20이다. 이전 체크포인트에
+저장된 깊이 9는 옵션 없이 재개하면 유지되므로, 깊이를 바꾸려면 명시적인
+`--reconfigure --online-tactics-max-depth 20`이 필요하다. 깊이는 양쪽 착수를
+합친 상한이며, 노드·시간 예산 내에 20수 증명이 완료된다는 보장은 없다.
+같은 예산에서 깊이를 늘리면 UNKNOWN이 증가할 수도 있다. 기존 E 상태를
+보존한 설정 준비와 재개 명령은
+[20수 변경 안내](training_loop.md#온라인-전술의-최대-깊이를-20수로-변경하기)를 참고한다.
 
 ## 실제 검증과 추가 학습: 2026-10-07
 
