@@ -41,7 +41,7 @@ class BatchedRuntimeTest(unittest.TestCase):
         trainer = self.trainer(evaluation_backend="batched_cpp", evaluation_leaf_batch_size=4,
                                evaluation_reuse_tree=False)
         trainer.save_checkpoint(self.path)
-        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 8)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 9)
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.evaluation_workers, 2)
         self.assertEqual(restored.evaluation_backend, "batched_cpp")
@@ -60,6 +60,9 @@ class BatchedRuntimeTest(unittest.TestCase):
         self.trainer().save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 4
+        payload.pop("promotion_league")
+        for key in loop._PROMOTION_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload.pop("training_budget_history")
         payload["progress"].pop("normal_training_steps")
         for key in loop._ADAPTIVE_CONFIG_KEYS:
@@ -120,6 +123,9 @@ class BatchedRuntimeTest(unittest.TestCase):
         self.trainer().save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 5
+        payload.pop("promotion_league")
+        for key in loop._PROMOTION_CONFIG_KEYS:
+            payload["config"].pop(key)
         payload.pop("training_budget_history")
         payload["progress"].pop("normal_training_steps")
         for key in loop._ADAPTIVE_CONFIG_KEYS:
@@ -132,7 +138,7 @@ class BatchedRuntimeTest(unittest.TestCase):
         restored = Trainer.load_checkpoint(self.path)
         self.assertEqual(restored.tactical_training_steps, 0)
         restored.save_checkpoint(self.path)
-        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 8)
+        self.assertEqual(torch.load(self.path, weights_only=True)["checkpoint_version"], 9)
 
     def test_extra_updates_round_trip_without_inventing_games_or_promoting(self):
         trainer = self.trainer()

@@ -3,6 +3,9 @@
 import argparse
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from kingdom_ai.metrics import load_metric_rows, summarize_metrics
 
@@ -79,6 +82,21 @@ def main():
     print(f"최근 평가: 흑 {percent(recent_evaluation['black_win_rate'])}, "
           f"백 {percent(recent_evaluation['white_win_rate'])}, "
           f"승격 {recent_evaluation['promotions']}/{recent['iterations']}")
+    league = summary["promotion_league"]
+    if league["enabled_iterations"]:
+        print(f"과거 버전 승격 평가: 1차 통과 {league['head_to_head_passes']}회, "
+              f"2차 평가 {league['evaluated_iterations']}회, 승격 {league['promotions']}회, "
+              f"실제 추가 대국 {league['actual_games_played']}판, "
+              f"현 챔피언 결과 재사용 {league['reference_cache_hits']}회")
+        comparison = league["latest_comparison"]
+        if comparison:
+            print(f"최근 2차 평가 ({comparison['iteration']}사이클): "
+                  f"후보 {percent(comparison['candidate_mean_win_rate'])}, "
+                  f"현 챔피언 {percent(comparison['reference_mean_win_rate'])}")
+            for result in comparison["by_version"]:
+                print(f"  champion_{result['version']}v: "
+                      f"후보 {percent(result['candidate_win_rate'])}, "
+                      f"현 챔피언 {percent(result['reference_win_rate'])}")
     if evaluation["latest_workers"] is not None:
         print(
             f"최근 평가 worker: {evaluation['latest_workers']}개 "

@@ -178,6 +178,9 @@ class OnlineTacticsLoopTest(unittest.TestCase):
             trainer.save_checkpoint(path)
             payload = torch.load(path, weights_only=True)
             payload["checkpoint_version"] = 6
+            payload.pop("promotion_league")
+            for key in loop._PROMOTION_CONFIG_KEYS:
+                payload["config"].pop(key)
             payload.pop("training_budget_history")
             payload["progress"].pop("normal_training_steps")
             for key in loop._ADAPTIVE_CONFIG_KEYS:
@@ -284,7 +287,13 @@ class OnlineTacticsLoopTest(unittest.TestCase):
         data = game(actions)
         # Keep the original exact nine-ply proof budget explicit; the new
         # default cap is not a promise that every position reaches depth 20.
-        trainer = self.trainer(online_tactics_max_depth=9, online_tactics_generation_seconds=5.0)
+        # This checks the exact proof-to-learning path, not machine throughput.
+        # The proof takes ~1.8s alone on the recorded machine and may exceed
+        # the production 2s limit under a combined suite. Keep the node cap and
+        # exact WIN/depth/PV assertions; only this test gets a generous deadline.
+        # A separate tiny-budget test verifies correct UNKNOWN on exhaustion.
+        trainer = self.trainer(online_tactics_max_depth=9, online_tactics_time_limit_ms=10000,
+                               online_tactics_generation_seconds=15.0)
         with patch.object(trainer, "_collect_games", return_value=iter((data, data))), \
                 patch("kingdom_ai.online_tactics.TacticalPositionMiner.cases", return_value=[case]), \
                 patch.object(loop, "evaluate_models", return_value=evaluation()):

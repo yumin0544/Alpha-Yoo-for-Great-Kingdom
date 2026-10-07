@@ -159,7 +159,7 @@ def export_training_model(
     if not isinstance(payload, dict):
         raise ValueError("Expected a full training checkpoint")
     version = payload.get("checkpoint_version")
-    if type(version) is not int or version not in range(1, 9):
+    if type(version) is not int or version not in range(1, 10):
         raise ValueError("Unsupported full training checkpoint version")
     expected_schema = {
         "format_version": FORMAT_VERSION, "board_size": BOARD_SIZE,

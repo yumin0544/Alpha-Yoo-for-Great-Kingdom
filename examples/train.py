@@ -72,6 +72,10 @@ def main():
                         help="자가 대국 초반 몇 수까지 기존 온도 사용; 이후 --final-temperature")
     parser.add_argument("--threads", type=positive_integer, default=1,
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
+    parser.add_argument("--promotion-archive-dir", type=str,
+                        help="1차 통과 후 비교할 champion_<버전>v/best.pt 폴더; 읽기 전용")
+    parser.add_argument("--promotion-archive-games", type=positive_integer,
+                        help="후보와 현 챔피언이 각각 과거 버전마다 두는 판수 (새 학습 기본 100)")
     parser.add_argument("--evaluation-workers", type=positive_integer,
                         help="평가 병렬 worker 수; 새 학습 기본 1, 재개 시 저장값 복원")
     parser.add_argument("--evaluation-backend", choices=("legacy", "batched_cpp"),
@@ -108,6 +112,8 @@ def main():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--eval-opening-moves", dest="evaluation_opening_moves", type=int)
     args = parser.parse_args()
+    if any(part.casefold() == "past-version" for part in args.output.resolve().parts):
+        parser.error("past-version은 읽기 전용입니다. 결과는 별도 --output 폴더에 저장하세요.")
     config_names = set(asdict(TrainingConfig()))
     overrides = {name: getattr(args, name) for name in config_names
                  if getattr(args, name) is not None}
@@ -169,6 +175,9 @@ def main():
             )
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(str(error))
+    if (trainer.config.promotion_archive_dir is not None
+            and args.output.resolve().is_relative_to(Path(trainer.config.promotion_archive_dir))):
+        parser.error("승격 평가 원본 폴더에는 결과를 저장할 수 없습니다. 별도 --output을 사용하세요.")
     print(
         f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판, "
         f"자료 생성 모델 {trainer.config.self_play_model}, "
@@ -177,6 +186,10 @@ def main():
     )
     print(json.dumps(asdict(trainer.config), ensure_ascii=False))
     print("평가 승률은 현재 기준 모델에 대한 결과이며, 절대 기력은 별도 검증해야 합니다.")
+    if trainer.config.promotion_archive_dir is not None:
+        print(f"승격: 현 챔피언 상대 {trainer.config.promotion_threshold:.0%} 이상 → "
+              f"과거 버전마다 두 모델 각각 {trainer.config.promotion_archive_games}판 → "
+              "후보의 평균 승률이 더 높을 때만 교체 (동률 유지)", flush=True)
 
     def report(row):
         trainer.export_champion(best)
@@ -199,6 +212,19 @@ def main():
             f"경과 {row['elapsed_with_checkpoint_seconds']:.2f}초", flush=True,
         )
         online_tactics = row.get("online_tactics", {})
+        league = row.get("promotion_league", {})
+        if league.get("evaluated", False):
+            print(f"과거 버전 비교: 후보 {league['candidate_mean_win_rate']:.1%}, "
+                  f"현 챔피언 {league['reference_mean_win_rate']:.1%}, "
+                  f"상대 {league['opponent_count']}개, 실제 추가 대국 {league['actual_games_played']}판, "
+                  f"현 챔피언 결과 재사용 {league['reference_cache_hit']}, "
+                  f"{league['seconds']:.2f}초", flush=True)
+            for result in league["results"]:
+                print(f"  champion_{result['version']}v: "
+                      f"후보 {result['candidate']['wins']}/{result['candidate']['games']} "
+                      f"({result['candidate']['win_rate']:.1%}), "
+                      f"현 챔피언 {result['reference']['wins']}/{result['reference']['games']} "
+                      f"({result['reference']['win_rate']:.1%})", flush=True)
         if online_tactics.get("enabled", False):
             print(
                 f"온라인 전술: 새 증명 {online_tactics['added_samples']}개, "

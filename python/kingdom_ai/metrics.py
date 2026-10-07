@@ -251,6 +251,29 @@ def _replay_capacity(rows):
     return ((inferred.pop(), "inferred_from_eviction") if inferred else (None, None))
 
 
+def _promotion_league_summary(rows):
+    covered = [row for row in rows if row.get("promotion_league", {}).get("enabled", False)]
+    evaluated = [row for row in covered if row["promotion_league"].get("evaluated", False)]
+    latest = None
+    if evaluated:
+        row = evaluated[-1]
+        report = row["promotion_league"]
+        latest = {"iteration": row["iteration"], "candidate_mean_win_rate": report["candidate_mean_win_rate"],
+                  "reference_mean_win_rate": report["reference_mean_win_rate"],
+                  "mean_win_rate_delta": report["mean_win_rate_delta"], "promoted": row["promoted"],
+                  "by_version": [{"version": result["version"],
+                      "candidate_win_rate": result["candidate"]["win_rate"],
+                      "reference_win_rate": result["reference"]["win_rate"]}
+                      for result in report["results"]]}
+    return {"enabled_iterations": len(covered), "evaluated_iterations": len(evaluated),
+            "head_to_head_passes": sum(bool(row["promotion_league"].get("gate_passed")) for row in covered),
+            "promotions": sum(bool(row["promoted"]) for row in covered),
+            "actual_games_played": sum(row["promotion_league"].get("actual_games_played", 0) for row in covered),
+            "reference_cache_hits": sum(bool(row["promotion_league"].get("reference_cache_hit")) for row in evaluated),
+            "seconds": sum(row["promotion_league"].get("seconds", 0.0) for row in covered),
+            "latest_comparison": latest}
+
+
 def summarize_metrics(rows, *, recent=20, target_iterations=None, duplicate_rows=0):
     if not isinstance(rows, list) or not rows:
         raise ValueError("rows must be a non-empty list")
@@ -319,6 +342,7 @@ def summarize_metrics(rows, *, recent=20, target_iterations=None, duplicate_rows
         "recent": recent_summary,
         "phase_seconds": phase_seconds,
         "online_tactics": _online_tactics_summary(ordered),
+        "promotion_league": _promotion_league_summary(ordered),
         "phase_fractions": {
             **{name: seconds / sum(row["elapsed_seconds"] for row in ordered)
                for name, seconds in phase_seconds.items()},

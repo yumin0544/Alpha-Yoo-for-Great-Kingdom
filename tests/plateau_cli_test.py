@@ -195,6 +195,44 @@ class PlateauCLITest(unittest.TestCase):
         self.assertTrue(self.trainer.config.online_tactics_include_loss)
         self.assertEqual(self.trainer.config.train_steps_per_iteration, 256)
 
+    def test_resume_doubles_only_future_updates_from_256_to_512(self):
+        self.trainer.config = replace(
+            self.trainer.config, train_steps_per_iteration=256,
+            replay_capacity=131072, games_per_iteration=2048, batch_size=512,
+            learning_rate=3e-5, self_play_model="learner", online_tactics=True,
+            online_tactics_fraction=0.05, online_tactics_max_depth=20,
+            online_tactics_include_loss=True)
+        saved_config = self.trainer.config
+        self.trainer.iteration = 575
+        self.trainer.self_play_games = 575 * saved_config.games_per_iteration
+        code, _, error, _ = self.invoke(
+            "--resume", self.source, "--reconfigure", "--prepare-only", "--train-steps", "512")
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.trainer.overrides, {"train_steps_per_iteration": 512})
+        self.assertEqual(self.trainer.config, replace(saved_config, train_steps_per_iteration=512))
+        self.assertEqual((self.trainer.iteration, self.trainer.self_play_games), (575, 1177600))
+        self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
+
+    def test_resume_forwards_fifty_five_percent_and_historical_pool_without_learning(self):
+        code, output, error, _ = self.invoke(
+            "--resume", self.source, "--reconfigure", "--prepare-only",
+            "--promotion-threshold", "0.55", "--promotion-archive-dir", self.path / "past-version",
+            "--promotion-archive-games", "100")
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.trainer.config.promotion_threshold, 0.55)
+        self.assertEqual(self.trainer.config.promotion_archive_games, 100)
+        self.assertEqual(self.trainer.config.promotion_archive_dir, str((self.path / "past-version").resolve()))
+        self.assertIn("동률 유지", output)
+        self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
+
+    def test_cli_never_writes_into_past_version(self):
+        protected = self.path / "past-version" / "new-run"
+        code, _, error, trainer_type = self.invoke("--output", protected, "--prepare-only")
+        self.assertEqual(code, 2)
+        self.assertIn("읽기 전용", error)
+        trainer_type.assert_not_called()
+        self.assertFalse(protected.exists())
+
     def test_explicit_negative_loss_flag_restores_win_only_control(self):
         self.trainer.config = replace(self.trainer.config, online_tactics_include_loss=True)
         code, _, error, _ = self.invoke(

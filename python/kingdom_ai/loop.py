@@ -25,6 +25,7 @@ from .model import PolicyValueNet
 from .puct import PUCTOptions
 from .replay import ReplayBuffer
 from .proof_replay import CertifiedTacticalReplay
+from .promotion import PromotionLeague
 from .training import collect_puct_game, train_step
 
 
@@ -46,6 +47,8 @@ class TrainingConfig:
     evaluation_opening_moves: int = 6
     evaluation_opening_temperature: float = 1.0
     promotion_threshold: float = 0.55
+    promotion_archive_dir: str | None = None
+    promotion_archive_games: int = 100
     seed: int = 42
     self_play_backend: str = "cpu"
     self_play_model: str = "champion"
@@ -70,7 +73,7 @@ class TrainingConfig:
         positive_ints = (
             "games_per_iteration", "simulations", "replay_capacity", "batch_size",
             "train_steps_per_iteration", "evaluation_games", "evaluation_simulations",
-            "self_play_batch_size",
+            "self_play_batch_size", "promotion_archive_games",
             "online_tactics_max_cases", "online_tactics_max_depth", "online_tactics_max_nodes",
             "online_tactics_time_limit_ms", "online_tactics_replay_capacity",
             "online_tactics_min_proof_depth",
@@ -118,6 +121,12 @@ class TrainingConfig:
             raise ValueError("Online tactics needs batch_size >= 2 to retain ordinary replay rows")
         if self.evaluation_games < 2 or self.evaluation_games % 2:
             raise ValueError("evaluation_games must be even and at least two")
+        if self.promotion_archive_games < 2 or self.promotion_archive_games % 2:
+            raise ValueError("promotion_archive_games must be even and at least two")
+        if self.promotion_archive_dir is not None:
+            if type(self.promotion_archive_dir) is not str or not self.promotion_archive_dir.strip():
+                raise ValueError("promotion_archive_dir must be None or a nonempty path string")
+            object.__setattr__(self, "promotion_archive_dir", str(Path(self.promotion_archive_dir).resolve()))
         if type(self.evaluation_opening_moves) is not int or self.evaluation_opening_moves < 0:
             raise ValueError("evaluation_opening_moves must be a non-negative integer")
         if type(self.seed) is not int or not 0 <= self.seed < 2 ** 64:
@@ -143,7 +152,8 @@ class TrainingConfig:
             raise ValueError("promotion_threshold must be in [0.5, 1]")
 
 
-_CHECKPOINT_VERSION = 8
+_CHECKPOINT_VERSION = 9
+_PROMOTION_CONFIG_KEYS = {"promotion_archive_dir", "promotion_archive_games"}
 _ADAPTIVE_CONFIG_KEYS = {"self_play_model", "online_tactics_include_loss"}
 _ONLINE_CONFIG_KEYS = {"online_tactics", "online_tactics_max_cases", "online_tactics_max_depth",
                        "online_tactics_max_nodes", "online_tactics_time_limit_ms",
@@ -168,6 +178,7 @@ _CHECKPOINT_KEYS = {
 }
 _CHECKPOINT_KEYS_V7 = _CHECKPOINT_KEYS | {"online_tactical_replay"}
 _CHECKPOINT_KEYS_V8 = _CHECKPOINT_KEYS_V7 | {"training_budget_history"}
+_CHECKPOINT_KEYS_V9 = _CHECKPOINT_KEYS_V8 | {"promotion_league"}
 _RUNTIME_KEYS_V4 = {"evaluation_workers"}
 _RUNTIME_KEYS = _RUNTIME_KEYS_V4 | {
     "evaluation_backend", "evaluation_leaf_batch_size", "evaluation_reuse_tree",
@@ -338,7 +349,7 @@ class Trainer:
 
     def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1,
                  evaluation_backend="legacy", evaluation_leaf_batch_size=8,
-                 evaluation_reuse_tree=True):
+                 evaluation_reuse_tree=True, promotion_league_state=None):
         if not isinstance(config, TrainingConfig):
             raise TypeError("config must be a TrainingConfig")
         if model is not None and not isinstance(model, PolicyValueNet):
@@ -352,6 +363,9 @@ class Trainer:
         if type(evaluation_reuse_tree) is not bool:
             raise ValueError("evaluation_reuse_tree must be a bool")
         self.config = config
+        self.promotion_league = PromotionLeague(
+            config.promotion_archive_dir, games=config.promotion_archive_games,
+            seed=config.seed, state=promotion_league_state)
         self.device = torch.device(device)
         # Parallel batching can change floating-point scheduling, so preserve
         # this operational setting in checkpoints even though it is not part of
@@ -442,6 +456,10 @@ class Trainer:
         if (config.online_tactics_replay_capacity != self.online_tactical_replay.capacity
                 and len(self.online_tactical_replay)):
             raise ValueError("Cannot resize a nonempty certified tactical replay")
+        league = self.promotion_league
+        if _PROMOTION_CONFIG_KEYS.intersection(overrides):
+            league = PromotionLeague(config.promotion_archive_dir,
+                                     games=config.promotion_archive_games, seed=config.seed)
         # Validation above completes before changing any owned state.
         if config.train_steps_per_iteration != self.config.train_steps_per_iteration:
             segment = {"start_iteration": self.iteration,
@@ -453,6 +471,7 @@ class Trainer:
         if config.online_tactics_replay_capacity != self.online_tactical_replay.capacity:
             self.online_tactical_replay = CertifiedTacticalReplay(config.online_tactics_replay_capacity)
         self.config = config
+        self.promotion_league = league
         for group in self.optimizer.param_groups:
             group["lr"] = config.learning_rate
             group["weight_decay"] = config.weight_decay
@@ -506,6 +525,7 @@ class Trainer:
     def run_iteration(self):
         if not self._at_boundary:
             raise RuntimeError("Reload the last checkpoint after an incomplete iteration")
+        self.promotion_league.check_unchanged()
         self._at_boundary = False
         self._synchronize()
         started = perf_counter()
@@ -661,7 +681,20 @@ class Trainer:
             workers=self.evaluation_workers,
             **evaluation_options,
         )
-        promoted = evaluation.win_rate >= config.promotion_threshold
+        gate_passed = evaluation.win_rate >= config.promotion_threshold
+        promotion_report = self.promotion_league.skipped_report(gate_passed)
+        promoted = gate_passed
+        if gate_passed and config.promotion_archive_dir is not None:
+            promotion_report = self.promotion_league.compare(
+                self.model, self.champion, evaluator=evaluate_models,
+                simulations=config.evaluation_simulations, c_puct=config.c_puct,
+                opening_moves=config.evaluation_opening_moves,
+                opening_temperature=config.evaluation_opening_temperature,
+                workers=self.evaluation_workers, backend=self.evaluation_backend,
+                leaf_batch_size=self.evaluation_leaf_batch_size,
+                reuse_tree=self.evaluation_reuse_tree,
+                tactical_checks=config.self_play_tactical_checks)
+            promoted = promotion_report["passed"]
         if promoted:
             self.champion = deepcopy(self.model).eval()
             self.champion_version += 1
@@ -695,6 +728,8 @@ class Trainer:
                for key, value in weighted_losses.items()},
             "training_draw_counts": drawn_rows,
             "evaluation": {**asdict(evaluation), "win_rate": evaluation.win_rate},
+            "promotion_threshold": config.promotion_threshold,
+            "promotion_league": promotion_report,
             "promoted": promoted, "self_play_seconds": self_play_seconds,
             "self_play_compute_seconds": self_play_compute_seconds,
             "replay_store_seconds": replay_store_seconds,
@@ -747,6 +782,7 @@ class Trainer:
             "checkpoint_version": _CHECKPOINT_VERSION, "schema": deepcopy(_SCHEMA),
             "online_tactical_replay": self.online_tactical_replay.state_dict(),
             "training_budget_history": deepcopy(self.training_budget_history),
+            "promotion_league": self.promotion_league.state_dict(),
             "config": asdict(self.config), "model_config": self.model.model_config,
             "model": _model_state(self.model), "champion": _model_state(self.champion),
             "optimizer": _cpu_copy(self.optimizer.state_dict()), "replay": self.replay.state_dict(),
@@ -781,7 +817,8 @@ class Trainer:
         version = payload.get("checkpoint_version")
         if type(version) is not int or version not in range(1, _CHECKPOINT_VERSION + 1):
             raise ValueError("Unsupported training checkpoint version")
-        expected_keys = (_CHECKPOINT_KEYS_V8 if version >= 8 else _CHECKPOINT_KEYS_V7 if version >= 7
+        expected_keys = (_CHECKPOINT_KEYS_V9 if version >= 9 else _CHECKPOINT_KEYS_V8 if version >= 8
+                         else _CHECKPOINT_KEYS_V7 if version >= 7
                          else _CHECKPOINT_KEYS if version >= 4
                          else _CHECKPOINT_KEYS - {"runtime"})
         if set(payload) != expected_keys:
@@ -790,6 +827,8 @@ class Trainer:
             raise ValueError("Training checkpoint game/input schema does not match")
         raw_config = payload["config"]
         config_keys = {field.name for field in fields(TrainingConfig)}
+        if version < 9:
+            config_keys -= _PROMOTION_CONFIG_KEYS
         if version < 8:
             config_keys -= _ADAPTIVE_CONFIG_KEYS
         if version < 7:
@@ -878,7 +917,8 @@ class Trainer:
             "evaluation_reuse_tree": evaluation_reuse_tree,
         }
         saved_runtime.update({name: value for name, value in requested_runtime.items() if value is not None})
-        trainer = cls(config, model=model, device=device, **saved_runtime)
+        trainer = cls(config, model=model, device=device, **saved_runtime,
+                      promotion_league_state=payload["promotion_league"] if version >= 9 else None)
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay
