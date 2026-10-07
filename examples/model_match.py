@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import sys
@@ -23,6 +24,10 @@ from kingdom_ai.model import PolicyValueNet
 
 REASONS = {"Capture": "상대 돌 포획", "Suicide": "자충수", "TwoPasses": "연속 패스"}
 COLORS = {"Black": "흑/선공", "White": "백/후공"}
+
+
+class MatchCancelled(Exception):
+    """Cooperative UI stop, checked after each completed search."""
 
 
 def file_digest(path):
@@ -80,6 +85,8 @@ def main(argv=None):
     parser.add_argument("--device", default="cpu", help="cpu 또는 cuda[:장치 번호] 신경망 추론")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--output", type=Path, help="매 판 기록을 저장할 새 JSONL 파일")
+    parser.add_argument("--progress-file", type=Path, help="UI용 현재 판·수 진행 정보")
+    parser.add_argument("--stop-file", type=Path, help="이 파일이 생기면 현재 탐색 후 중단")
     parser.add_argument("--show-board", action="store_true", help="매 판 최종 보드 표시")
     parser.add_argument("--watch", action="store_true", help="매 수와 진행 보드 표시")
     parser.add_argument("--rating-a", type=float, default=1500.0)
@@ -97,6 +104,8 @@ def main(argv=None):
         parser.error("--threads는 1 이상이어야 합니다.")
     if args.output is not None and args.output.exists():
         parser.error("결과 파일이 이미 있습니다. 새 --output 경로를 사용하세요.")
+    if args.progress_file is not None and args.progress_file.exists():
+        parser.error("진행 파일이 이미 있습니다. 새 --progress-file 경로를 사용하세요.")
     try:
         options = MatchOptions(games=args.games, simulations=args.simulations,
                                c_puct=args.c_puct, seed=args.seed,
@@ -115,6 +124,7 @@ def main(argv=None):
     output = None
     completed = 0
     terminal_complete = False
+    started = None
     names = {"a": args.name_a, "b": args.name_b}
     try:
         if args.demo:
@@ -165,9 +175,27 @@ def main(argv=None):
         print(f"{args.name_a} vs {args.name_b} | {args.games}판 | "
               f"수당 {args.simulations}회 탐색 | {device}", flush=True)
         active_index = None
+        last_progress = 0.0
+        current_plies = 0
 
         def on_move(index, actor, move, state):
-            nonlocal active_index
+            nonlocal active_index, last_progress, current_plies
+            if args.stop_file is not None and args.stop_file.exists():
+                raise MatchCancelled("사용자 중단")
+            now = perf_counter()
+            current_plies = current_plies + 1 if index == active_index else 1
+            if args.progress_file is not None and (index != active_index or now - last_progress >= 1):
+                args.progress_file.parent.mkdir(parents=True, exist_ok=True)
+                temporary = args.progress_file.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"index": index, "plies": current_plies,
+                                                "elapsed_seconds": now - started}), encoding="utf-8")
+                try:
+                    os.replace(temporary, args.progress_file)
+                except PermissionError:
+                    # On Windows a reader can briefly prevent replacement.
+                    # Progress may skip an update; durable game results do not.
+                    temporary.unlink(missing_ok=True)
+                last_progress = now
             if active_index != index:
                 active_index = index
                 black = args.name_a if index % 2 else args.name_b
@@ -212,7 +240,8 @@ def main(argv=None):
             print(f"대국 기록: {args.output.resolve()}")
         return 0
     except (Exception, KeyboardInterrupt) as error:
-        message = "사용자 중단" if isinstance(error, KeyboardInterrupt) else str(error)
+        cancelled = isinstance(error, (KeyboardInterrupt, MatchCancelled))
+        message = "사용자 중단" if cancelled else str(error)
         if terminal_complete:
             notice = f"대결은 완료됐지만 결과 표시가 중단됐습니다: {message}."
             if output is not None:
@@ -221,14 +250,15 @@ def main(argv=None):
             return 130 if isinstance(error, KeyboardInterrupt) else 1
         if output is not None:
             try:
-                output.write(json.dumps({"type": "aborted", "status": "failed",
-                                         "completed_games": completed, "error": message},
+                output.write(json.dumps({"type": "aborted", "status": "cancelled" if cancelled else "failed",
+                                         "completed_games": completed, "error": message,
+                                         "elapsed_seconds": perf_counter() - started if started is not None else 0.0},
                                         ensure_ascii=False, allow_nan=False) + "\n")
                 output.flush()
             except OSError:
                 pass
         print(f"대결 중단: {message}. 완료 {completed}판; 레이팅은 적용하지 않습니다.", file=sys.stderr)
-        return 130 if isinstance(error, KeyboardInterrupt) else 1
+        return 130 if cancelled else 1
     finally:
         if output is not None:
             output.close()

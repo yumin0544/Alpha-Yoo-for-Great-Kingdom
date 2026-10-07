@@ -370,6 +370,17 @@ Windows에서 저장소의 `PlayGreatKingdom.cmd`를 더블클릭하면 게임 �
 
 ### 두 모델을 대결시키고 결과 확인하기
 
+화면에서 실행·조회하려면 Windows에서 `ModelMatches.cmd`를 더블클릭한다.
+모델 A/B, 전체 대국 수(기본 1,000판)와 매 수 탐색 횟수를 따로 지정하고,
+진행률·누적 및 선후공별 승률·종료 사유·완료 레이팅을 확인한다.
+판별 결과 필터·페이지·기보 재생과 CSV/JSONL 내려받기를 지원하며,
+기존 콘솔 결과도 다시 열 수 있다. 자세한 사용법은
+[모델 대결 대시보드](docs/match_ui.md)에 있다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\play_ui.py --open --page matches --port 0
+```
+
 저장한 두 `best.pt`를 같은 탐색 예산과 흑백 교대 쌍으로 대결시킨다.
 각 판의 승자·종료 사유와 최종 승패·흑백별 승률·내부 시리즈 레이팅을 표시한다.
 

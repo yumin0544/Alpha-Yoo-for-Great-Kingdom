@@ -227,9 +227,10 @@ class PlaySession:
         self.pool.shutdown(wait=False, cancel_futures=True)
 
 
-def make_server(session, assets, port=0):
+def make_server(session, assets, port=0, matches=None):
     """Serve only loopback with exact static paths and same-origin JSON writes."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlsplit
 
     assets = Path(assets)
 
@@ -237,7 +238,7 @@ def make_server(session, assets, port=0):
         def log_message(self, *args):
             pass
 
-        def send_data(self, data, status=200, content_type="application/json; charset=utf-8"):
+        def send_data(self, data, status=200, content_type="application/json; charset=utf-8", filename=None):
             payload = (json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
                        if isinstance(data, dict) else data)
             self.send_response(status)
@@ -245,6 +246,8 @@ def make_server(session, assets, port=0):
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            if filename is not None:
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
             self.wfile.write(payload)
 
@@ -256,15 +259,42 @@ def make_server(session, assets, port=0):
             if not self.allowed():
                 self.send_data({"error": "잘못된 주소입니다."}, 403)
                 return
+            route = urlsplit(self.path)
+            parts = route.path.strip("/").split("/")
+            if matches is not None and parts[:2] == ["api", "matches"]:
+                try:
+                    if len(parts) == 2:
+                        self.send_data({"runs": matches.list_runs(), "session_id": session.session_id})
+                    elif len(parts) == 3:
+                        self.send_data(matches.snapshot(parts[2]))
+                    elif len(parts) == 4 and parts[3] == "games":
+                        query = parse_qs(route.query)
+                        self.send_data(matches.games(parts[2], page=int(query.get("page", ["1"])[0]),
+                            winner=query.get("winner", ["all"])[0], reason=query.get("reason", ["all"])[0],
+                            color=query.get("color", ["all"])[0]))
+                    elif len(parts) == 5 and parts[3] == "replay":
+                        self.send_data(matches.replay(parts[2], int(parts[4])))
+                    elif len(parts) == 4 and parts[3] in ("csv", "jsonl"):
+                        data, mime = matches.download(parts[2], parts[3])
+                        self.send_data(data, content_type=mime,
+                                       filename=f"match-{parts[2]}.{parts[3]}")
+                    else:
+                        self.send_data({"error": "페이지를 찾을 수 없습니다."}, 404)
+                except (ValueError, TypeError, KeyError, OSError) as error:
+                    self.send_data({"error": str(error)}, 400)
+                return
             if self.path == "/api/state":
                 self.send_data(session.snapshot())
             elif self.path == "/api/models":
                 self.send_data({"models": [{"id": key, "name": Path(key).parent.as_posix()}
                                           for key in sorted(session.models, reverse=True)]})
-            elif self.path in ("/", "/style.css", "/app.js"):
+            elif self.path in ("/", "/style.css", "/app.js", "/matches", "/match.css", "/match.js"):
                 file, mime = {"/": ("index.html", "text/html; charset=utf-8"),
                               "/style.css": ("style.css", "text/css; charset=utf-8"),
-                              "/app.js": ("app.js", "text/javascript; charset=utf-8")}[self.path]
+                              "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                              "/matches": ("match.html", "text/html; charset=utf-8"),
+                              "/match.css": ("match.css", "text/css; charset=utf-8"),
+                              "/match.js": ("match.js", "text/javascript; charset=utf-8")}[self.path]
                 self.send_data((assets / file).read_bytes(), content_type=mime)
             else:
                 self.send_data({"error": "페이지를 찾을 수 없습니다."}, 404)
@@ -289,11 +319,18 @@ def make_server(session, assets, port=0):
                     response = session.new_game(PlaySettings(**body["settings"]), body["revision"])
                 elif self.path == "/api/move":
                     response = session.move(body["action"], body["revision"])
+                elif matches is not None and self.path == "/api/matches/start":
+                    response = matches.start(body["settings"])
+                elif matches is not None and self.path.startswith("/api/matches/") and self.path.endswith("/stop"):
+                    parts = self.path.strip("/").split("/")
+                    if len(parts) != 4:
+                        raise ValueError("대결 주소를 확인해 주세요.")
+                    response = matches.stop(parts[2])
                 else:
                     self.send_data({"error": "동작을 찾을 수 없습니다."}, 404)
                     return
                 self.send_data(response)
-            except (ValueError, TypeError, KeyError) as error:
+            except (ValueError, TypeError, KeyError, OSError) as error:
                 self.send_data({"error": str(error), "state": session.snapshot()}, 400)
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
