@@ -5,6 +5,7 @@ keeps polls small, and never changes or resumes an imported match.
 """
 
 from copy import deepcopy
+from dataclasses import asdict
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -42,6 +43,7 @@ class MatchLog:
         self.offset = 0
         self.session = None
         self.records = []
+        self.by_index = {}
         self.terminal = None
         self.error = self.request.get("error")
         self.wins = {"a": 0, "b": 0}
@@ -79,11 +81,16 @@ class MatchLog:
                 raise ValueError("지원하지 않는 결과 형식입니다.")
             if {p["id"] for p in row["participants"]} != {"a", "b"}:
                 raise ValueError("두 참가자 정보가 필요합니다.")
-            MatchOptions(**{key: row["protocol"][key] for key in MatchOptions.__dataclass_fields__})
+            options = MatchOptions(**{key: value for key, value in row["protocol"].items()
+                                      if key in MatchOptions.__dataclass_fields__})
+            row["protocol"] = {**asdict(options), **row["protocol"]}
             self.session = row
             return
         if kind == "game":
-            if (row["index"] != len(self.records) + 1 or row["winner"] not in self.wins
+            protocol = self.session["protocol"]
+            index = row["index"]
+            if (type(index) is not int or not 1 <= index <= protocol["games"]
+                    or index in self.by_index or row["winner"] not in self.wins
                     or row["model_a_color"] not in ("Black", "White")
                     or row["reason"] not in REASONS or type(row["plies"]) is not int
                     or not 1 <= row["plies"] <= 164
@@ -92,9 +99,14 @@ class MatchLog:
                 raise ValueError("판별 승패 또는 수순이 올바르지 않습니다.")
             color_a = row["model_a_color"]
             color_b = "White" if color_a == "Black" else "Black"
+            if (color_a != ("Black" if index % 2 else "White")
+                    or row["pair_index"] != (index + 1) // 2
+                    or row["seed"] != (protocol["seed"] + (index - 1) // 2) % (2 ** 64)):
+                raise ValueError("판 번호와 흑백·시드 배정이 일치하지 않습니다.")
             if row["winner_color"] != (color_a if row["winner"] == "a" else color_b):
                 raise ValueError("승자와 흑백 배정이 일치하지 않습니다.")
             self.records.append(row)
+            self.by_index[index] = row
             self.wins[row["winner"]] += 1
             for key, color in (("a", color_a), ("b", color_b)):
                 self.colors[key][color]["games"] += 1
@@ -154,6 +166,7 @@ class MatchLog:
                 "mean_plies": self.total_plies / completed if completed else None,
                 "elapsed_seconds": elapsed, "eta_seconds":
                 elapsed / completed * (target - completed) if live and not self.terminal and elapsed and completed >= 2 else None,
+                "games_per_minute": completed / elapsed * 60 if elapsed and completed else None,
                 "progress": progress, "curve": deepcopy(curve),
                 "ratings": deepcopy(self.terminal.get("ratings")) if self.terminal and not self.error else None,
                 "error": self.error or (self.terminal.get("error") if self.terminal else process_error),
@@ -263,16 +276,20 @@ class MatchManager:
             raise ValueError("대결 설정을 확인해 주세요.")
         allowed = {"model_a", "model_b", "games", "simulations", "device", "seed", "tactical_checks",
                    "rating_a", "rating_b", "k"}
-        if set(values) != allowed:
+        execution = {"workers", "backend", "leaf_batch_size", "reuse_tree", "inference_wait_ms"}
+        if not allowed.issubset(values) or set(values) - allowed - execution:
             raise ValueError("대결 설정 항목을 확인해 주세요.")
         if any(values[key] not in self.models for key in ("model_a", "model_b")):
             raise ValueError("목록에서 두 모델을 선택해 주세요.")
         if values["model_a"] == values["model_b"]:
             raise ValueError("서로 다른 모델 두 개를 선택해 주세요.")
         options = MatchOptions(games=values["games"], simulations=values["simulations"], seed=values["seed"],
-                               tactical_checks=values["tactical_checks"])
+                               tactical_checks=values["tactical_checks"],
+                               **{key: values[key] for key in execution if key in values})
         if options.games > 100000 or options.simulations > 100000:
             raise ValueError("대국 수와 수당 탐색은 각각 100,000 이하로 설정해 주세요.")
+        if options.workers > 64 or options.leaf_batch_size > 64 or options.inference_wait_ms > 10:
+            raise ValueError("동시 대국·추론 배치는 각각 64 이하, 추론 대기는 10ms 이하로 설정해 주세요.")
         if values["device"] not in ("cpu", "cuda"):
             raise ValueError("CPU 또는 GPU를 선택해 주세요.")
         series_ratings(values["rating_a"], values["rating_b"], 0, options.games, values["k"])
@@ -297,6 +314,9 @@ class MatchManager:
                               "--name-" + key, names[key]]
             for name in ("games", "simulations", "seed", "device", "rating_a", "rating_b", "k"):
                 arguments += ["--" + name.replace("_", "-"), str(values[name])]
+            for name in ("workers", "backend", "leaf_batch_size", "inference_wait_ms"):
+                arguments += ["--" + name.replace("_", "-"), str(getattr(options, name))]
+            arguments += ["--reuse-tree" if options.reuse_tree else "--no-reuse-tree"]
             arguments += ["--tactical-checks" if options.tactical_checks else "--no-tactical-checks",
                           "--output", str(output), "--progress-file", str(folder / "progress.json"),
                           "--stop-file", str(folder / "stop.request")]
@@ -326,7 +346,7 @@ class MatchManager:
             raise ValueError("검색 조건을 확인해 주세요.")
         with self.lock:
             log = self._get(identifier)
-            rows = [row for row in reversed(log.records)
+            rows = [row for row in sorted(log.records, key=lambda row: row["index"], reverse=True)
                     if (winner == "all" or row["winner"] == winner)
                     and (reason == "all" or row["reason"] == reason)
                     and (color == "all" or row["model_a_color"] == color)]
@@ -339,9 +359,9 @@ class MatchManager:
     def replay(self, identifier, index):
         with self.lock:
             log = self._get(identifier)
-            if type(index) is not int or not 1 <= index <= len(log.records):
+            if type(index) is not int or index not in log.by_index:
                 raise ValueError("해당 판의 기보를 찾을 수 없습니다.")
-            row = deepcopy(log.records[index - 1])
+            row = deepcopy(log.by_index[index])
         state = engine.State()
         frames = []
         for action in [None, *row["actions"]]:
@@ -376,7 +396,7 @@ class MatchManager:
                 name = participants.get(key, key.upper())
                 return "'" + name if name.startswith(("=", "+", "-", "@", "\t", "\r")) else name
             writer.writerow(["판", "모델 A", "모델 B", "매 수 탐색", "시드", "A의 돌", "승자", "승자 돌", "종료 사유", "수순 수", "흑 집", "백 집"])
-            for row in log.records:
+            for row in sorted(log.records, key=lambda row: row["index"]):
                 writer.writerow([row["index"], csv_name("a"), csv_name("b"), log.session["protocol"]["simulations"], row["seed"], row["model_a_color"], row["winner"].upper(), row["winner_color"],
                                  REASONS[row["reason"]], row["plies"], row["territory"]["black"], row["territory"]["white"]])
             return stream.getvalue().encode("utf-8-sig"), "text/csv; charset=utf-8"

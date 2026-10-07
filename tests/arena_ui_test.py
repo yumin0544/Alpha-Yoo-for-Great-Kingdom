@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 import torch
 import my_board_engine as engine
 
-from kingdom_ai.arena_ui import MatchManager
+from kingdom_ai.arena_ui import MatchManager, run_id
 from kingdom_ai.checkpoint import save_model
 from kingdom_ai.match import MatchOptions, board_rows, series_ratings
 from kingdom_ai.model import PolicyValueNet
@@ -124,6 +124,37 @@ class CatalogTest(Fixture):
         self.assertIsNone(view["ratings"])
         self.assertIn("일치",view["error"])
 
+    def test_out_of_order_parallel_results_use_stable_game_ids(self):
+        path, events = self.write_series(1024)
+        # #1024 can finish while #1 is still playing. Legacy session headers
+        # omit the new parallel fields and must remain readable.
+        for key in ("workers", "backend", "leaf_batch_size", "reuse_tree", "inference_wait_ms"):
+            events[0]["protocol"].pop(key)
+        reordered = [events[0], *reversed(events[1:-1]), events[-1]]
+        path.write_text("".join(json.dumps(row)+"\n" for row in reordered), encoding="utf-8")
+        identifier = self.manager.list_runs()[0]["id"]
+        view = self.manager.snapshot(identifier)
+        self.assertEqual((view["status"], view["completed"]), ("complete", 1024))
+        self.assertEqual(view["protocol"]["workers"], 1)
+        self.assertEqual(self.manager.replay(identifier, 1)["record"]["index"], 1)
+        self.assertEqual(self.manager.replay(identifier, 1024)["record"]["index"], 1024)
+        self.assertEqual(self.manager.games(identifier)["items"][0]["index"], 1024)
+
+    def test_partial_parallel_results_reject_duplicate_and_out_of_range_ids(self):
+        path, events = self.write_series(4)
+        path.write_text("".join(json.dumps(row)+"\n" for row in (events[0], events[4])), encoding="utf-8")
+        identifier = self.manager.list_runs()[0]["id"]
+        self.assertEqual(self.manager.replay(identifier, 4)["record"]["index"], 4)
+        with self.assertRaises(ValueError): self.manager.replay(identifier, 1)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(events[4])+"\n")
+        self.assertEqual(self.manager.snapshot(identifier)["status"], "failed")
+        invalid_path = self.root / "runs/out-of-range.jsonl"
+        invalid = {**events[4], "index": 5}
+        invalid_path.write_text(json.dumps(events[0])+"\n"+json.dumps(invalid)+"\n", encoding="utf-8")
+        self.manager.discover(force=True)
+        self.assertEqual(self.manager.snapshot(run_id(invalid_path, self.root))["status"], "failed")
+
     def test_public_views_are_independent_and_ids_cannot_access_other_files(self):
         _,_=self.write_series(2)
         identifier=self.manager.list_runs()[0]["id"]
@@ -138,7 +169,9 @@ class CatalogTest(Fixture):
 
     def test_settings_are_validated_before_job_or_files_are_created(self):
         for changes in ({"games":1001},{"games":100002},{"simulations":True},{"device":"mps"},
-                        {"model_a":"../other.pt"},{"model_b":"runs/a/best.pt"},{"k":float("nan")}):
+                        {"model_a":"../other.pt"},{"model_b":"runs/a/best.pt"},{"k":float("nan")},
+                        {"workers":0},{"workers":65},{"workers":True},{"backend":"other"},
+                        {"leaf_batch_size":65},{"reuse_tree":1},{"inference_wait_ms":11}):
             with self.subTest(changes=changes),self.assertRaises((ValueError,TypeError)):
                 self.manager.start({**self.settings(),**changes})
         self.assertFalse((self.root/"runs/matches").exists())
@@ -169,6 +202,19 @@ class WorkerTest(Fixture):
         self.assertIsNotNone(done["ratings"])
         self.assertTrue((Path(done["file"]).parent/"progress.json").exists())
         self.assertGreaterEqual(len(self.manager.replay(view["id"],1)["frames"]),3)
+
+    def test_parallel_saved_models_record_execution_and_progress(self):
+        self.save_models()
+        view = self.manager.start({**self.settings(games=8), "workers":4, "backend":"batched_cpp",
+                                   "leaf_batch_size":4, "reuse_tree":True})
+        done = self.wait_job(view["id"])
+        self.assertEqual((done["status"], done["completed"]), ("complete", 8), done["error"])
+        self.assertEqual(done["protocol"]["workers"], 4)
+        self.assertEqual(done["protocol"]["backend"], "batched_cpp")
+        progress = json.loads((Path(done["file"]).parent/"progress.json").read_text())
+        self.assertLessEqual(len(progress["active_games"]), 4)
+        self.assertGreater(done["games_per_minute"], 0)
+        for index in range(1, 9): self.manager.replay(view["id"], index)
 
     def test_duplicate_jobs_are_blocked_and_stop_is_cooperative(self):
         self.save_models()

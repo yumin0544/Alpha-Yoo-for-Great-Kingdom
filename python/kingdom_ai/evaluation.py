@@ -127,6 +127,7 @@ def _play_batched_game(
     opening_moves: int,
     opening_temperature: float,
     tactical_checks: bool = False,
+    on_move=None,
 ) -> tuple[engine.Cell, engine.EndReason, int]:
     """Play one worker-owned game through shared batched model callbacks."""
     reference_color = (
@@ -163,6 +164,8 @@ def _play_batched_game(
         plies += 1
         if plies > 2 * engine.CELL_COUNT + 2:
             raise RuntimeError("Evaluation game exceeded its finite move bound")
+        if on_move is not None:
+            on_move(actor, move, game.copy())
     if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
         raise RuntimeError("A completed evaluation game must have a winner")
     return game.result.winner, game.result.reason, plies
@@ -175,6 +178,7 @@ def _play_encoded_game(
     *, simulations: int, c_puct: float, seed: int, opening_moves: int,
     opening_temperature: float, tactical_checks: bool,
     leaf_batch_size: int, reuse_tree: bool,
+    on_move=None,
 ):
     """Keep one reusable tree per model, never mix opposing model values."""
     reference_color = (engine.Cell.White if candidate_color == engine.Cell.Black
@@ -215,6 +219,8 @@ def _play_encoded_game(
         plies += 1
         if plies > 2 * engine.CELL_COUNT + 2:
             raise RuntimeError("Evaluation game exceeded its finite move bound")
+        if on_move is not None:
+            on_move(actor, move, game.copy())
     if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
         raise RuntimeError("A completed evaluation game must have a winner")
     for searcher in searchers.values():

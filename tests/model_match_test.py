@@ -1,6 +1,7 @@
 """Completed match records, color pairing, observer isolation and local Elo."""
 
 from dataclasses import asdict
+from threading import Barrier, Event, Lock, get_ident
 import json
 import math
 import random
@@ -13,7 +14,7 @@ import torch
 
 from kingdom_ai.encoding import action_to_move
 from kingdom_ai.evaluation import evaluate_models
-from kingdom_ai.match import MatchOptions, play_match, series_ratings
+from kingdom_ai.match import MatchCancelled, MatchOptions, play_match, series_ratings
 from kingdom_ai.model import PolicyValueNet
 
 
@@ -278,6 +279,11 @@ class ModelMatchTest(unittest.TestCase):
             "opening_moves": (-1, True, 1.0),
             "opening_temperature": (-1, float("nan"), float("inf"), True, "1"),
             "tactical_checks": (None, 0, 1, "true"),
+            "workers": (0, -1, True, 1.0),
+            "backend": (None, "unknown", 1),
+            "leaf_batch_size": (0, True, 2.0),
+            "reuse_tree": (None, 0, "true"),
+            "inference_wait_ms": (-1, True, float("nan")),
         }
         with patch("kingdom_ai.evaluation.PUCT") as searcher:
             for name, values in invalid.items():
@@ -290,10 +296,83 @@ class ModelMatchTest(unittest.TestCase):
                     play_match(*models)
             with self.assertRaises(TypeError):
                 play_match(self.model_a, self.model_b, {})
-            for name in ("on_game", "on_move"):
+            for name in ("on_game", "on_move", "on_game_start", "should_stop"):
                 with self.subTest(callback=name), self.assertRaises(TypeError):
                     play_match(self.model_a, self.model_b, **{name: 3})
             searcher.assert_not_called()
+
+    def test_parallel_backends_replay_and_restore_caller_state(self):
+        for backend in ("legacy", "batched_cpp"):
+            with self.subTest(backend=backend):
+                before = self.prepare_caller_state()
+                completed, diagnostics = [], {}
+                result = play_match(self.model_a, self.model_b, MatchOptions(
+                    games=4, simulations=3, workers=3, backend=backend, leaf_batch_size=2,
+                ), on_game=lambda record: completed.append(record["index"]), diagnostics=diagnostics)
+                self.assertEqual(sorted(completed), [1, 2, 3, 4])
+                self.assertEqual([row["index"] for row in result["records"]], [1, 2, 3, 4])
+                for record in result["records"]:
+                    self.assert_replay(record)
+                self.assertEqual(diagnostics["workers"], 3)
+                self.assertGreater(diagnostics["model_a"]["inference_batches"], 0)
+                self.assert_caller_state(before)
+
+    def test_1000_game_schedule_is_bounded_concurrent_and_drains_completed_results(self):
+        # All three games enter together. #1 waits until a later game has been
+        # saved, proving completion callbacks do not wait for index order.
+        barrier, finish, release, stop = Barrier(3, timeout=10), Barrier(2, timeout=10), Event(), Event()
+        lock = Lock()
+        started, completed, worker_ids = [], [], set()
+        caller = get_ident()
+
+        def game(a, b, color, *, seed, on_move, **kwargs):
+            with lock:
+                started.append((color, seed))
+                worker_ids.add(get_ident())
+            barrier.wait()
+            first = color == engine.Cell.Black and seed == 42
+            if first:
+                self.assertTrue(release.wait(10))
+            state = engine.State()
+            for ply in range(2):
+                actor, move = state.to_play, engine.Move.pass_turn()
+                state.play(move)
+                on_move(actor, move, state.copy())
+                if ply == 0 and not first:
+                    finish.wait()
+            return state.result.winner, state.result.reason, 2
+
+        def saved(record):
+            self.assertEqual(get_ident(), caller)
+            completed.append(record["index"])
+            if len(completed) == 1:
+                stop.set()
+                release.set()
+
+        before = self.prepare_caller_state()
+        with patch("kingdom_ai.match._play_batched_game", side_effect=game), \
+                self.assertRaises(MatchCancelled):
+            play_match(self.model_a, self.model_b, MatchOptions(games=1000, workers=3),
+                       on_game=saved, should_stop=stop.is_set)
+        self.assertEqual(len(started), 3)
+        self.assertEqual(len(worker_ids), 3)
+        self.assertEqual(set(completed), {2, 3})
+        self.assert_caller_state(before)
+
+    def test_parallel_service_and_observer_failures_release_workers(self):
+        before = self.prepare_caller_state()
+        with patch.object(PolicyValueNet, "forward", side_effect=RuntimeError("network failed")), \
+                self.assertRaisesRegex(RuntimeError, "network failed"):
+            play_match(self.model_a, self.model_b, MatchOptions(
+                games=1000, simulations=3, workers=4, backend="batched_cpp"))
+        self.assert_caller_state(before)
+        for name in ("on_move", "on_game"):
+            with self.subTest(callback=name), self.assertRaisesRegex(LookupError, "observer failed"):
+                def fail(*args):
+                    raise LookupError("observer failed")
+                play_match(self.model_a, self.model_b, MatchOptions(
+                    games=1000, simulations=1, workers=4, backend="batched_cpp"), **{name: fail})
+            self.assert_caller_state(before)
 
     def test_series_ratings_math_zero_sum_and_series_weight(self):
         win = series_ratings(1500., 1500., 2, 2)

@@ -18,16 +18,12 @@ import my_board_engine as engine
 import torch
 
 from kingdom_ai.checkpoint import load_model
-from kingdom_ai.match import MatchOptions, board_rows, play_match, series_ratings
+from kingdom_ai.match import MatchCancelled, MatchOptions, board_rows, play_match, series_ratings
 from kingdom_ai.model import PolicyValueNet
 
 
 REASONS = {"Capture": "상대 돌 포획", "Suicide": "자충수", "TwoPasses": "연속 패스"}
 COLORS = {"Black": "흑/선공", "White": "백/후공"}
-
-
-class MatchCancelled(Exception):
-    """Cooperative UI stop, checked after each completed search."""
 
 
 def file_digest(path):
@@ -84,6 +80,11 @@ def main(argv=None):
     parser.add_argument("--tactical-checks", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default="cpu", help="cpu 또는 cuda[:장치 번호] 신경망 추론")
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=1, help="동시에 실행할 대국 수")
+    parser.add_argument("--backend", choices=("legacy", "batched_cpp"), default="legacy")
+    parser.add_argument("--leaf-batch-size", type=int, default=8, help="빠른 탐색의 판별 추론 배치 크기")
+    parser.add_argument("--reuse-tree", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--inference-wait-ms", type=float, default=0.0)
     parser.add_argument("--output", type=Path, help="매 판 기록을 저장할 새 JSONL 파일")
     parser.add_argument("--progress-file", type=Path, help="UI용 현재 판·수 진행 정보")
     parser.add_argument("--stop-file", type=Path, help="이 파일이 생기면 현재 탐색 후 중단")
@@ -111,7 +112,10 @@ def main(argv=None):
                                c_puct=args.c_puct, seed=args.seed,
                                opening_moves=args.opening_moves,
                                opening_temperature=args.opening_temperature,
-                               tactical_checks=args.tactical_checks)
+                               tactical_checks=args.tactical_checks,
+                               workers=args.workers, backend=args.backend,
+                               leaf_batch_size=args.leaf_batch_size, reuse_tree=args.reuse_tree,
+                               inference_wait_ms=args.inference_wait_ms)
         series_ratings(args.rating_a, args.rating_b, 0, args.games, args.k)
         device = torch.device(args.device)
         if device.type not in ("cpu", "cuda"):
@@ -149,8 +153,9 @@ def main(argv=None):
             "type": "session", "schema_version": 1,
             "started_at_utc": datetime.now(timezone.utc).isoformat(),
             "participants": identities,
-            "protocol": {**asdict(options), "device": str(device), "backend": "legacy",
-                         "workers": 1, "threads": args.threads, "time_limit_ms": 0,
+            "protocol": {**asdict(options), "device": str(device),
+                         "workers": min(options.workers, options.games),
+                         "threads": args.threads, "time_limit_ms": 0,
                          "dirichlet_epsilon": 0.0,
                          "rules": {"board_size": 9, "neutral": [4, 4],
                                    "suicide": "Loses", "stones_per_player": 41,
@@ -173,43 +178,53 @@ def main(argv=None):
 
         emit(session)
         print(f"{args.name_a} vs {args.name_b} | {args.games}판 | "
-              f"수당 {args.simulations}회 탐색 | {device}", flush=True)
-        active_index = None
+              f"수당 {args.simulations}회 탐색 | {device} | "
+              f"동시 {min(args.workers, args.games)}판 | {args.backend}", flush=True)
+        active = {}
         last_progress = 0.0
-        current_plies = 0
+
+        def progress(force=False):
+            nonlocal last_progress
+            now = perf_counter()
+            if args.progress_file is None or (not force and now - last_progress < 1):
+                return
+            args.progress_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = args.progress_file.with_suffix(".tmp")
+            index = min(active, default=completed + 1)
+            temporary.write_text(json.dumps({
+                "index": index, "plies": active.get(index, 0),
+                "active_games": [{"index": i, "plies": p} for i, p in sorted(active.items())],
+                "workers": min(args.workers, args.games), "completed": completed,
+                "elapsed_seconds": now - started,
+            }), encoding="utf-8")
+            try:
+                os.replace(temporary, args.progress_file)
+            except PermissionError:
+                # A Windows reader may briefly block this optional update.
+                temporary.unlink(missing_ok=True)
+            last_progress = now
+
+        def on_game_start(index, color, seed):
+            active[index] = 0
+            progress(force=True)
+            black = args.name_a if index % 2 else args.name_b
+            white = args.name_b if index % 2 else args.name_a
+            print(f"[{index}/{args.games}] 대국 시작: 흑 {black} / 백 {white}", flush=True)
 
         def on_move(index, actor, move, state):
-            nonlocal active_index, last_progress, current_plies
-            if args.stop_file is not None and args.stop_file.exists():
-                raise MatchCancelled("사용자 중단")
-            now = perf_counter()
-            current_plies = current_plies + 1 if index == active_index else 1
-            if args.progress_file is not None and (index != active_index or now - last_progress >= 1):
-                args.progress_file.parent.mkdir(parents=True, exist_ok=True)
-                temporary = args.progress_file.with_suffix(".tmp")
-                temporary.write_text(json.dumps({"index": index, "plies": current_plies,
-                                                "elapsed_seconds": now - started}), encoding="utf-8")
-                try:
-                    os.replace(temporary, args.progress_file)
-                except PermissionError:
-                    # On Windows a reader can briefly prevent replacement.
-                    # Progress may skip an update; durable game results do not.
-                    temporary.unlink(missing_ok=True)
-                last_progress = now
-            if active_index != index:
-                active_index = index
-                black = args.name_a if index % 2 else args.name_b
-                white = args.name_b if index % 2 else args.name_a
-                print(f"[{index}/{args.games}] 대국 시작: 흑 {black} / 백 {white}", flush=True)
+            active[index] += 1
+            progress()
             if args.watch:
                 move_text = "패스" if move.is_pass() else f"{move.point.row + 1}행 {move.point.col + 1}열"
-                print(f"{COLORS[actor.name]}: {move_text}")
+                print(f"[{index}] {COLORS[actor.name]}: {move_text}")
                 print_board(board_rows(state))
 
         def on_game(record):
             nonlocal completed
             emit({"type": "game", **record})
             completed += 1
+            active.pop(record["index"], None)
+            progress()
             print(f"[{record['index']}/{args.games}] {names[record['winner']]} 승리 "
                   f"({COLORS[record['winner_color']]}, {REASONS[record['reason']]}, "
                   f"{record['plies']}수) | 집 흑 {record['territory']['black']} / "
@@ -218,11 +233,16 @@ def main(argv=None):
                 print_board(record["board"])
 
         started = perf_counter()
-        result = play_match(*models, options, on_game=on_game, on_move=on_move)
+        diagnostics = {}
+        result = play_match(*models, options, on_game=on_game, on_move=on_move,
+                            on_game_start=on_game_start,
+                            should_stop=lambda: args.stop_file is not None and args.stop_file.exists(),
+                            diagnostics=diagnostics)
         ratings = series_ratings(args.rating_a, args.rating_b, result["wins_a"], args.games, args.k)
         summary = {key: value for key, value in result.items() if key != "records"}
         emit({"type": "summary", "status": "complete", **summary,
-              "ratings": ratings, "elapsed_seconds": perf_counter() - started})
+              "ratings": ratings, "elapsed_seconds": perf_counter() - started,
+              "diagnostics": diagnostics})
         terminal_complete = True
         print("\n대결 완료", flush=True)
         for key in ("a", "b"):

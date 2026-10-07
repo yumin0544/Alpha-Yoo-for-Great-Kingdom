@@ -9,7 +9,7 @@
 <body>
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark">♜</span><span>GREAT KINGDOM<small>MODEL ARENA</small></span></a><nav><a href="/">직접 플레이 ↗</a><span class="local-badge"><i></i> 로컬 대결</span></nav></header>
   <main>
-    <div class="page-heading"><div><p class="eyebrow">THE BIGGER PICTURE</p><h1>수천 판의 결과를, 한눈에.</h1><p class="subtitle">두 모델을 같은 조건으로 대결시키고, 한 판씩 쌓이는 차이를 확인하세요.</p></div><span class="heading-mark">A <span>vs</span> B</span></div>
+    <div class="page-heading"><div><p class="eyebrow">THE BIGGER PICTURE</p><h1>수천 판의 결과를, 한눈에.</h1><p class="subtitle">여러 판을 동시에 실행하고, 쌓이는 결과를 바로 확인하세요.</p></div><span class="heading-mark">A <span>vs</span> B</span></div>
     <div class="workspace">
       <aside>
         <section class="panel setup-panel"><p class="eyebrow">NEW MATCH</p><h2>새 대결</h2><p class="helper">두 판씩 선후공을 바꿔 공정하게 비교합니다.</p>
@@ -18,6 +18,9 @@
             <label for="model-b"><span class="letter b">B</span> 두 번째 모델</label><select id="model-b" required></select>
             <div class="form-pair"><div><label for="games">전체 대국 수</label><input id="games" type="number" min="2" max="100000" step="2" value="1000" required></div><div><label for="simulations">매 수 탐색 횟수</label><input id="simulations" type="number" min="1" max="100000" step="1" value="128" required></div></div>
             <div class="form-pair"><div><label for="device">추론 장치</label><select id="device"><option value="cpu">CPU</option><option value="cuda">GPU</option></select></div><div><label for="seed">시드</label><input id="seed" type="number" min="0" max="4294967295" step="1" value="42" required></div></div>
+            <div class="form-pair"><div><label for="workers">동시 대국 수</label><input id="workers" type="number" min="1" max="64" step="1" value="4" required></div><div><label for="backend">실행 방식</label><select id="backend"><option value="batched_cpp">빠른 배치 탐색</option><option value="legacy">기존 탐색</option></select></div></div>
+            <p class="helper" id="parallel-hint">CPU 동시 4판 · GPU 동시 12판 권장. 완료한 판부터 자동 저장합니다.</p>
+            <details><summary>탐색 세부 설정 <span>+</span></summary><label for="leaf-batch-size">판별 추론 배치 크기</label><input id="leaf-batch-size" type="number" min="1" max="64" step="1" value="16" required><label class="checkbox"><input id="reuse-tree" type="checkbox" checked> 이전 탐색 트리 재사용</label><p class="helper">빠른 배치 탐색에 적용합니다. 배치 크기와 트리 재사용에 따라 기존 탐색과 선택 수가 달라질 수 있습니다. 비교 실험은 같은 설정을 사용하세요.</p></details>
             <label class="checkbox"><input id="tactical" type="checkbox"> 양쪽에 즉시 승리·안전 수 검사 적용</label>
             <details><summary>레이팅 설정 <span>+</span></summary><div class="form-pair"><div><label for="rating-a">A 시작 레이팅</label><input id="rating-a" type="number" value="1500" step="any" required></div><div><label for="rating-b">B 시작 레이팅</label><input id="rating-b" type="number" value="1500" step="any" required></div></div><label for="rating-k">대결 전체 가중치 K</label><input id="rating-k" type="number" value="32" min="0.01" step="any" required></details>
             <button class="primary" id="start-match" type="submit" disabled>대결 시작 <span>→</span></button>
@@ -35,6 +38,7 @@
             <div class="progress-heading"><span class="status-pill" id="run-status">준비</span><strong id="progress-count">0 / 1,000판</strong><button class="stop-button" id="stop-match" hidden>대결 중단</button></div>
             <div class="progress-track" role="progressbar" aria-label="완료한 대국" id="progress-bar" aria-valuemin="0" aria-valuemax="100"><span id="progress-fill"></span></div>
             <div class="progress-meta"><span id="live-description">모델을 준비하고 있습니다.</span><span id="elapsed">—</span></div>
+            <p class="helper" id="throughput">완료한 대국이 쌓이면 처리 속도를 표시합니다.</p>
             <p class="error-notice" id="run-error" hidden></p>
           </section>
           <div class="contestants">
@@ -59,7 +63,7 @@
   </main>
   <footer><span>GREAT KINGDOM · MODEL ARENA</span><span>작은 판 위에서 확인하는, 모델의 다음 가능성</span></footer>
   <div class="toast" id="toast" role="status" hidden></div>
-  <dialog id="stop-dialog"><p class="eyebrow">PAUSE THE EXPERIMENT</p><h2>이번 대결을 중단할까요?</h2><p>현재 탐색이 끝난 뒤 중단합니다. 완료된 판은 보존되며, 전체 대결 레이팅은 적용하지 않습니다.</p><div class="dialog-actions"><button class="small-button" id="stop-cancel">계속 대결</button><button class="primary" id="stop-confirm">중단하고 결과 보기</button></div></dialog>
+  <dialog id="stop-dialog"><p class="eyebrow">PAUSE THE EXPERIMENT</p><h2>이번 대결을 중단할까요?</h2><p>실행 중인 각 판의 현재 탐색이 끝나면 중단합니다. 완료된 판은 보존되며, 전체 대결 레이팅은 적용하지 않습니다.</p><div class="dialog-actions"><button class="small-button" id="stop-cancel">계속 대결</button><button class="primary" id="stop-confirm">중단하고 결과 보기</button></div></dialog>
   <dialog id="replay-dialog"><div class="panel-heading"><div><p class="eyebrow">ONE GAME, EVERY MOVE</p><h2 id="replay-title">기보</h2></div><button class="close-button" id="replay-close" aria-label="기보 닫기">×</button></div><p id="replay-summary"></p><div id="replay-board" class="replay-board" role="img" aria-label="대국 기보 보드"></div><div class="replay-navigation"><button class="small-button" id="replay-prev" aria-label="이전 수">←</button><input id="replay-slider" aria-label="기보 수순" type="range" min="0" max="0" value="0"><button class="small-button" id="replay-next" aria-label="다음 수">→</button></div><p id="replay-step" class="replay-step"></p></dialog>
 </body>
 </html>

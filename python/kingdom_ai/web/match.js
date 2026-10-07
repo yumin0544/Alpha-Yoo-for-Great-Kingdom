@@ -5,6 +5,7 @@ const statuses = {loading:"모델 준비",running:"대결 중",stopping:"중단 
 let serverId = null, selectedId = null, current = null, runs = [], requesting = false, connected = true;
 let page = 1, pages = 1, visualKey = "", rowsKey = "", rowsRequest = 0, toastTimer, stopId;
 let replay = null, replayRequest = 0;
+let workersEdited = false;
 
 function node(tag, text, className) {
   const value = document.createElement(tag);
@@ -77,7 +78,7 @@ function svg(tag, attrs, text) {
 }
 function drawTrend(view) {
   const root = $("trend-chart"); root.replaceChildren();
-  if (!view.curve.length) {root.append(node("div","첫 판이 끝나면 승률의 흐름이 표시됩니다.","chart-empty"));return;}
+  if (!view.curve.length) {root.setAttribute("aria-label","완료한 대국이 없습니다.");root.append(node("div","첫 판이 끝나면 승률의 흐름이 표시됩니다.","chart-empty"));return;}
   const chart = svg("svg",{viewBox:"0 0 640 180",preserveAspectRatio:"none","aria-hidden":"true"});
   for (const value of [0,0.5,1]) {
     const y = 144 - value*128;
@@ -141,10 +142,14 @@ function render(view) {
   const percentage=view.target?view.completed/view.target*100:0;
   $("progress-fill").style.width=`${percentage}%`;$("progress-bar").setAttribute("aria-valuenow",String(percentage));
   $("stop-match").hidden=!view.can_stop;$("stop-match").disabled=requesting;
-  const protocol = `${view.protocol.device === "cuda"?"GPU":"CPU"} · 매 수 ${number(view.protocol.simulations || 0)}회 · 시드 ${view.protocol.seed??42} · 전술 검사 ${view.protocol.tactical_checks?"적용":"미적용"}`;
-  const progress = view.progress && ["running","stopping"].includes(view.status) ? `${view.progress.index}판 진행 · ${view.progress.plies}수 · ` : "";
-  $("live-description").textContent=view.status==="loading"?"두 모델을 준비하고 있습니다.":view.status==="stopping"?"현재 탐색이 끝나면 중단합니다.":progress+protocol;
+  const workers = Math.min(view.protocol.workers || 1, view.target);
+  const fast = view.protocol.backend === "batched_cpp";
+  const protocol = `${view.protocol.device === "cuda"?"GPU":"CPU"} · 동시 ${workers}판 · ${fast?"빠른 배치 탐색":"기존 탐색"} · 매 수 ${number(view.protocol.simulations || 0)}회 · 시드 ${view.protocol.seed??42} · 전술 검사 ${view.protocol.tactical_checks?"적용":"미적용"}${fast?` · 배치 ${view.protocol.leaf_batch_size} · 트리 재사용 ${view.protocol.reuse_tree?"켜짐":"꺼짐"}`:""}`;
+  const active = view.progress?.active_games;
+  const progress = view.progress && view.status === "running" ? (active ? `진행 중 ${active.length}판 · ` : `${view.progress.index}판 ${view.progress.plies}수 · `) : "";
+  $("live-description").textContent=view.status==="loading"?`두 모델을 준비하고 있습니다. · 동시 ${workers}판`:view.status==="stopping"?"각 판의 현재 탐색이 끝나면 중단합니다.":progress+protocol;
   $("elapsed").textContent=`경과 ${duration(view.elapsed_seconds)}${view.eta_seconds!=null?` · 예상 남은 시간 약 ${duration(view.eta_seconds)}`:""}`;
+  $("throughput").textContent=view.games_per_minute ? `평균 분당 ${view.games_per_minute.toFixed(1)}판 · 예상 시간은 완료한 대국의 평균 속도를 기준으로 갱신합니다.` : "완료한 대국이 쌓이면 처리 속도를 표시합니다.";
   $("run-error").hidden=!view.error;$("run-error").textContent=view.error || "";
   $("storage-path").textContent=`자동 저장 · ${view.file}`;
   for (const format of ["csv","jsonl"]) {
@@ -233,14 +238,21 @@ for (const format of ["csv","jsonl"]) $(`download-${format}`).addEventListener("
 $("match-form").addEventListener("submit",async event=>{
   event.preventDefault();if(requesting) return;
   const settings={model_a:$("model-a").value,model_b:$("model-b").value,games:Number($("games").value),simulations:Number($("simulations").value),
-    device:$("device").value,seed:Number($("seed").value),tactical_checks:$("tactical").checked,rating_a:Number($("rating-a").value),rating_b:Number($("rating-b").value),k:Number($("rating-k").value)};
+    device:$("device").value,seed:Number($("seed").value),tactical_checks:$("tactical").checked,rating_a:Number($("rating-a").value),rating_b:Number($("rating-b").value),k:Number($("rating-k").value),
+    workers:Number($("workers").value),backend:$("backend").value,leaf_batch_size:Number($("leaf-batch-size").value),reuse_tree:$("reuse-tree").checked};
   if(settings.model_a===settings.model_b){notify("서로 다른 모델 두 개를 선택해 주세요.");return;}
   requesting=true;updateStart();
   try {
     const view=await api("/api/matches/start",{settings});selectedId=view.id;page=1;rowsKey="";visualKey="";current=view;
-    await loadCatalog();await loadSelected();notify(`${number(settings.games)}판 대결을 시작했습니다. 매 판 자동 저장합니다.`);
+    await loadCatalog();await loadSelected();notify(`${number(settings.games)}판 대결 · 동시 ${Math.min(settings.workers,settings.games)}판으로 시작했습니다.`);
   } catch(error){notify(error.message);}
   finally{requesting=false;updateStart();}
+});
+$("workers").addEventListener("input",()=>{workersEdited=true;});
+$("device").addEventListener("change",()=>{if(!workersEdited) $("workers").value=$("device").value==="cuda"?"12":"4";});
+$("backend").addEventListener("change",()=>{
+  const legacy=$("backend").value==="legacy";
+  $("leaf-batch-size").disabled=legacy;$("reuse-tree").disabled=legacy;
 });
 $("stop-match").addEventListener("click",()=>{stopId=selectedId;$("stop-dialog").showModal();});
 $("stop-cancel").addEventListener("click",()=>$("stop-dialog").close());
