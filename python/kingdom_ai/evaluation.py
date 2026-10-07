@@ -77,6 +77,7 @@ def _play_game(
     opening_moves: int,
     opening_temperature: float,
     tactical_checks: bool = False,
+    on_move=None,
 ) -> tuple[engine.Cell, engine.EndReason, int]:
     # New searchers and a reset generator make each swapped-color pair use
     # the same randomness. Search itself has no noise or wall-clock budget.
@@ -95,7 +96,8 @@ def _play_game(
     game = engine.State()
     plies = 0
     while not game.result.finished():
-        result = searchers[game.to_play].search(game)
+        actor = game.to_play
+        result = searchers[actor].search(game)
         temperature = opening_temperature if plies < opening_moves else 0.0
         if tactical_checks:
             move = _sample_tactical_visits(result, analyze_tactics(game),
@@ -107,6 +109,8 @@ def _play_game(
         plies += 1
         if plies > 2 * engine.CELL_COUNT + 2:
             raise RuntimeError("Evaluation game exceeded its finite move bound")
+        if on_move is not None:
+            on_move(actor, move, game.copy())
     if game.result.winner not in (engine.Cell.Black, engine.Cell.White):
         raise RuntimeError("A completed evaluation game must have a winner")
     return game.result.winner, game.result.reason, plies

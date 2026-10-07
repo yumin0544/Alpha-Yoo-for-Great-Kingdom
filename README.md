@@ -354,6 +354,19 @@ GPU 재개 시 `--device cuda`를 지정하고 자가 대국 설정은 체크포
 새 대국, `q`로 프로그램을 끝낸다. 현재 저장 자료의 위치·범위와 실행 방법은
 [직접 대국 안내](docs/play_ai.md)에 있다.
 
+### 두 모델을 대결시키고 결과 확인하기
+
+저장한 두 `best.pt`를 같은 탐색 예산과 흑백 교대 쌍으로 대결시킨다.
+각 판의 승자·종료 사유와 최종 승패·흑백별 승률·내부 시리즈 레이팅을 표시한다.
+
+```powershell
+.\.venv\Scripts\python.exe examples\model_match.py --model-a runs\model-a\best.pt --model-b runs\model-b\best.pt --games 20 --simulations 128 --output runs\match-a-b.jsonl
+```
+
+`--show-board`는 최종 보드, `--watch`는 수마다 보드를 표시한다. 모델 파일 없이
+`--demo --games 2 --simulations 4`로 실행을 확인할 수 있다. 기록 형식, 모델 파일과
+레이팅의 적용 범위는 [두 모델 대결 안내](docs/model_match.md)에 있다.
+
 ## Roadmap
 
 - [x] Record game rules and development plan

@@ -20,6 +20,7 @@ from .training import (
 )
 from .replay import ReplayBuffer
 from .evaluation import EvaluationResult, evaluate_models
+from .match import MatchOptions, play_match, series_ratings
 from .loop import Trainer, TrainingConfig
 
 __all__ = [
@@ -31,5 +32,6 @@ __all__ = [
     "collect_gpu_puct_games",
     "TrainingSample", "collect_mcts_game", "collect_puct_game", "make_batch", "policy_value_loss", "train_step",
     "PUCT", "PUCTOptions", "PUCTSearchResult", "sample_visits",
-    "ReplayBuffer", "EvaluationResult", "evaluate_models", "Trainer", "TrainingConfig",
+    "ReplayBuffer", "EvaluationResult", "evaluate_models", "MatchOptions", "play_match",
+    "series_ratings", "Trainer", "TrainingConfig",
 ]
