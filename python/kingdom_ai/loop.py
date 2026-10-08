@@ -349,7 +349,8 @@ class Trainer:
 
     def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1,
                  evaluation_backend="legacy", evaluation_leaf_batch_size=8,
-                 evaluation_reuse_tree=True, promotion_league_state=None):
+                 evaluation_reuse_tree=True, promotion_league_state=None,
+                 promotion_archive_allow_additions=False):
         if not isinstance(config, TrainingConfig):
             raise TypeError("config must be a TrainingConfig")
         if model is not None and not isinstance(model, PolicyValueNet):
@@ -365,7 +366,8 @@ class Trainer:
         self.config = config
         self.promotion_league = PromotionLeague(
             config.promotion_archive_dir, games=config.promotion_archive_games,
-            seed=config.seed, state=promotion_league_state)
+            seed=config.seed, state=promotion_league_state,
+            allow_additions=promotion_archive_allow_additions)
         self.device = torch.device(device)
         # Parallel batching can change floating-point scheduling, so preserve
         # this operational setting in checkpoints even though it is not part of
@@ -799,7 +801,9 @@ class Trainer:
     @classmethod
     def load_checkpoint(cls, path, device="cpu", evaluation_workers=None,
                         evaluation_backend=None, evaluation_leaf_batch_size=None,
-                        evaluation_reuse_tree=None):
+                        evaluation_reuse_tree=None, refresh_promotion_archive=False):
+        if type(refresh_promotion_archive) is not bool:
+            raise ValueError("refresh_promotion_archive must be a bool")
         if (evaluation_workers is not None
                 and (type(evaluation_workers) is not int or evaluation_workers < 1)):
             raise ValueError("evaluation_workers must be None or a positive integer")
@@ -840,6 +844,8 @@ class Trainer:
         if not isinstance(raw_config, dict) or set(raw_config) != config_keys:
             raise ValueError("Invalid checkpoint training configuration")
         config = TrainingConfig(**raw_config)
+        if refresh_promotion_archive and (version < 9 or config.promotion_archive_dir is None):
+            raise ValueError("Archive refresh requires a checkpoint with an enabled pinned promotion archive")
         progress = payload["progress"]
         expected_progress = (_PROGRESS_KEYS if version >= 8 else _PROGRESS_KEYS_V6 if version >= 6
                              else _PROGRESS_KEYS_V5)
@@ -918,7 +924,8 @@ class Trainer:
         }
         saved_runtime.update({name: value for name, value in requested_runtime.items() if value is not None})
         trainer = cls(config, model=model, device=device, **saved_runtime,
-                      promotion_league_state=payload["promotion_league"] if version >= 9 else None)
+                      promotion_league_state=payload["promotion_league"] if version >= 9 else None,
+                      promotion_archive_allow_additions=refresh_promotion_archive)
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay

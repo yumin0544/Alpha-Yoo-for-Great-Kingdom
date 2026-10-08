@@ -233,6 +233,26 @@ class PlateauCLITest(unittest.TestCase):
         trainer_type.assert_not_called()
         self.assertFalse(protected.exists())
 
+    def test_explicit_archive_refresh_is_forwarded_only_in_a_separate_reconfigure_run(self):
+        self.trainer.config = replace(self.trainer.config,
+            promotion_archive_dir=str(self.path / "past-version"))
+        saved_config = self.trainer.config
+        code, output, error, trainer_type = self.invoke(
+            "--resume", self.source, "--reconfigure", "--prepare-only", "--refresh-promotion-archive")
+        self.assertEqual(code, 0, error)
+        self.assertTrue(trainer_type.load_checkpoint.call_args.kwargs["refresh_promotion_archive"])
+        self.assertEqual(self.trainer.config, saved_config)
+        self.assertIn("상대 목록을 갱신", output)
+        self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
+
+    def test_archive_refresh_requires_resume_and_explicit_reconfiguration(self):
+        for options in ((), ("--resume", self.source), ("--reconfigure",)):
+            with self.subTest(options=options):
+                code, _, error, trainer_type = self.invoke("--refresh-promotion-archive", *options)
+                self.assertEqual(code, 2)
+                self.assertIn("--resume", error)
+                trainer_type.assert_not_called()
+
     def test_explicit_negative_loss_flag_restores_win_only_control(self):
         self.trainer.config = replace(self.trainer.config, online_tactics_include_loss=True)
         code, _, error, _ = self.invoke(

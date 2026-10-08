@@ -35,6 +35,8 @@ def main():
                         help="--resume과 새 --output으로 설정 변경; 진행·optimizer·버퍼 유지")
     parser.add_argument("--prepare-only", action="store_true",
                         help="모델·설정·버퍼를 저장하고 대국을 시작하지 않음")
+    parser.add_argument("--refresh-promotion-archive", action="store_true",
+                        help="--resume --reconfigure로 새 과거 챔피언만 추가하고 평가 캐시 초기화")
     parser.add_argument("--device", default="cpu", help="cpu 또는 사용 가능한 cuda 장치")
     parser.add_argument("--self-play-backend", choices=("cpu", "cuda"),
                         help="자가 대국 규칙·탐색 장치 (기본 cpu); cuda는 --device cuda 필요")
@@ -119,6 +121,8 @@ def main():
                  if getattr(args, name) is not None}
     if args.reconfigure and not args.resume:
         parser.error("--reconfigure에는 --resume이 필요합니다.")
+    if args.refresh_promotion_archive and not (args.resume and args.reconfigure):
+        parser.error("--refresh-promotion-archive에는 --resume --reconfigure와 새 --output이 필요합니다.")
     if args.resume and (args.channels is not None or args.residual_blocks is not None):
         parser.error("재개 시 모델 구성을 변경할 수 없습니다.")
     if args.resume and overrides and not args.reconfigure:
@@ -149,6 +153,7 @@ def main():
                 evaluation_backend=args.evaluation_backend,
                 evaluation_leaf_batch_size=args.evaluation_leaf_batch_size,
                 evaluation_reuse_tree=args.evaluation_reuse_tree,
+                **({"refresh_promotion_archive": True} if args.refresh_promotion_archive else {}),
             )
             if args.reconfigure:
                 trainer.reconfigure(**overrides)
@@ -190,6 +195,8 @@ def main():
         print(f"승격: 현 챔피언 상대 {trainer.config.promotion_threshold:.0%} 이상 → "
               f"과거 버전마다 두 모델 각각 {trainer.config.promotion_archive_games}판 → "
               "후보의 평균 승률이 더 높을 때만 교체 (동률 유지)", flush=True)
+        if args.refresh_promotion_archive:
+            print("과거 상대 목록을 갱신했습니다. 새 버전이 추가되면 기존 평가 캐시는 초기화됩니다.", flush=True)
 
     def report(row):
         trainer.export_champion(best)

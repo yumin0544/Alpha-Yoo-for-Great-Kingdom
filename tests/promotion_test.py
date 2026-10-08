@@ -184,6 +184,83 @@ class PromotionTest(unittest.TestCase):
         trainer.reconfigure(promotion_archive_dir=str(self.archive))
         self.assertEqual([row["version"] for row in trainer.promotion_league.opponents], [106, 128, 177])
 
+    def test_explicit_refresh_loads_new_version_preserves_training_and_invalidates_cache(self):
+        trainer = self.trainer()
+        self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
+        source = self.root / "latest.pt"
+        trainer.save_checkpoint(source)
+        original_bytes = source.read_bytes()
+        old = torch.load(source, weights_only=True)
+        added = self.archive / "champion_185v"
+        added.mkdir()
+        save_model(self.reference, added / "best.pt")
+        archive_snapshot = self.snapshot()
+        with self.assertRaises(ValueError):
+            Trainer.load_checkpoint(source)
+        restored = Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        self.assertEqual([row["version"] for row in restored.promotion_league.opponents], [106, 177, 185])
+        self.assertIsNone(restored.promotion_league.reference_cache)
+        prepared = self.root / "refreshed.pt"
+        restored.save_checkpoint(prepared)
+        new = torch.load(prepared, weights_only=True)
+
+        def same(left, right):
+            self.assertEqual(type(left), type(right))
+            if isinstance(left, torch.Tensor):
+                self.assertEqual(left.dtype, right.dtype)
+                self.assertEqual(left.shape, right.shape)
+                self.assertTrue(torch.equal(left, right))
+            elif isinstance(left, dict):
+                self.assertEqual(left.keys(), right.keys())
+                for key in left:
+                    same(left[key], right[key])
+            elif isinstance(left, (list, tuple)):
+                self.assertEqual(len(left), len(right))
+                for before, after in zip(left, right):
+                    same(before, after)
+            else:
+                self.assertEqual(left, right)
+
+        for key in old.keys() - {"promotion_league"}:
+            same(old[key], new[key])
+        self.assertEqual(source.read_bytes(), original_bytes)
+        self.assertEqual(self.snapshot(), archive_snapshot)
+        # The new pool requires fresh results for both actors, not an old 2-opponent mean.
+        metrics, evaluate = self.run_cycle(restored, [result(22, 40)] + [result(50)] * 6)
+        self.assertEqual(evaluate.call_count, 7)
+        self.assertEqual(metrics["promotion_league"]["opponent_count"], 3)
+        self.assertEqual(metrics["promotion_league"]["actual_games_played"], 600)
+        self.assertFalse(metrics["promotion_league"]["reference_cache_hit"])
+
+    def test_refresh_never_accepts_replaced_or_removed_pinned_opponents(self):
+        trainer = self.trainer()
+        source = self.root / "latest.pt"
+        trainer.save_checkpoint(source)
+        added = self.archive / "champion_185v"
+        added.mkdir()
+        save_model(self.reference, added / "best.pt")
+        old_path = self.archive / "champion_106v" / "best.pt"
+        save_model(self.candidate, old_path)
+        with self.assertRaisesRegex(ValueError, "replaced"):
+            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        old_path.unlink()
+        with self.assertRaises(OSError):
+            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+
+    def test_refresh_without_changes_preserves_valid_cache_and_requires_enabled_archive(self):
+        trainer = self.trainer()
+        self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
+        source = self.root / "latest.pt"
+        trainer.save_checkpoint(source)
+        restored = Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        self.assertEqual(restored.promotion_league.state_dict(), trainer.promotion_league.state_dict())
+        with self.assertRaises(ValueError):
+            Trainer.load_checkpoint(source, refresh_promotion_archive=1)
+        disabled = Trainer(TrainingConfig(), self.candidate)
+        disabled.save_checkpoint(source)
+        with self.assertRaisesRegex(ValueError, "enabled"):
+            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+
     def test_empty_duplicate_or_incomplete_archive_is_not_silently_ignored(self):
         empty = self.root / "empty"
         empty.mkdir()

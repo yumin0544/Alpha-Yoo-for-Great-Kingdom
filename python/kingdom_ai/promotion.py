@@ -21,11 +21,13 @@ class PromotionLeague:
     same weights, opponents, seeds and complete evaluation/search settings.
     """
 
-    def __init__(self, directory, *, games=100, seed=42, state=None):
+    def __init__(self, directory, *, games=100, seed=42, state=None, allow_additions=False):
         if type(games) is not int or games < 2 or games % 2:
             raise ValueError("Promotion games must be even and at least two")
         if type(seed) is not int or not 0 <= seed < 2 ** 64:
             raise ValueError("Promotion seed must be an unsigned 64-bit integer")
+        if type(allow_additions) is not bool:
+            raise ValueError("allow_additions must be a bool")
         self.directory = Path(directory).resolve() if directory is not None else None
         self.games, self.seed = games, seed
         self.opponents, self.models = [], []
@@ -36,7 +38,7 @@ class PromotionLeague:
                 self.models.append(load_model(opponent["path"]))
             self.check_unchanged()
         if state is not None:
-            self._restore(state)
+            self._restore(state, allow_additions=allow_additions)
 
     def _discover(self):
         opponents = []
@@ -62,13 +64,24 @@ class PromotionLeague:
         return deepcopy({"version": 1, "opponents": self.opponents,
                          "reference_cache": self.reference_cache})
 
-    def _restore(self, state):
+    def _restore(self, state, *, allow_additions=False):
         if (not isinstance(state, dict)
                 or set(state) != {"version", "opponents", "reference_cache"}
                 or type(state["version"]) is not int or state["version"] != 1
-                or not isinstance(state["opponents"], list)
-                or json.dumps(state["opponents"], sort_keys=True) != json.dumps(self.opponents, sort_keys=True)):
+                or not isinstance(state["opponents"], list)):
             raise ValueError("Invalid or changed checkpoint promotion archive")
+        saved_opponents = state["opponents"]
+        changed = json.dumps(saved_opponents, sort_keys=True) != json.dumps(self.opponents, sort_keys=True)
+        if changed:
+            saved_rows = {json.dumps(row, sort_keys=True) for row in saved_opponents}
+            current_rows = {json.dumps(row, sort_keys=True) for row in self.opponents}
+            # Explicit refresh accepts additions only; every pinned old path,
+            # version and SHA-256 must still match. Never accept replacements.
+            if (not allow_additions or not saved_rows
+                    or len(saved_rows) != len(saved_opponents)
+                    or not saved_rows < current_rows):
+                raise ValueError("Promotion archive changed; refresh accepts new versions only, "
+                                 "not removed or replaced opponents")
         cache = state["reference_cache"]
         if cache is not None:
             if (self.directory is None or not isinstance(cache, dict)
@@ -76,15 +89,15 @@ class PromotionLeague:
                     or type(cache["signature"]) is not str
                     or re.fullmatch(r"[0-9a-f]{64}", cache["signature"]) is None
                     or not isinstance(cache["results"], list)
-                    or len(cache["results"]) != len(self.opponents)):
+                    or len(cache["results"]) != len(saved_opponents)):
                 raise ValueError("Invalid checkpoint promotion reference cache")
-            for opponent, row in zip(self.opponents, cache["results"]):
+            for opponent, row in zip(saved_opponents, cache["results"]):
                 if (not isinstance(row, dict) or set(row) != {"version", "seed", "evaluation"}
                         or type(row["version"]) is not int or row["version"] != opponent["version"]
                         or type(row["seed"]) is not int or row["seed"] != self._seed(opponent)):
                     raise ValueError("Invalid checkpoint promotion reference result")
                 self._validate_result(row["evaluation"])
-        self.reference_cache = deepcopy(cache)
+        self.reference_cache = None if changed else deepcopy(cache)
 
     def _seed(self, opponent):
         return (self.seed + opponent["version"]) % (2 ** 64)
