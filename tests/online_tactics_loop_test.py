@@ -178,6 +178,9 @@ class OnlineTacticsLoopTest(unittest.TestCase):
             trainer.save_checkpoint(path)
             payload = torch.load(path, weights_only=True)
             payload["checkpoint_version"] = 6
+            payload.pop("capture_defense_replay")
+            for key in loop._CAPTURE_DEFENSE_CONFIG_KEYS:
+                payload["config"].pop(key)
             payload.pop("promotion_league")
             for key in loop._PROMOTION_CONFIG_KEYS:
                 payload["config"].pop(key)

@@ -68,6 +68,11 @@ def main():
               f"혼합 갱신 {online['mixed_updates']}회, "
               f"전술 표본 추출 {online['tactical_training_draws']}회, "
               f"최근 증명 버퍼 {size_text}개")
+        if online["latest_defense_replay_size"] is not None:
+            print(f"포획 회피: 새 반례 {online['defense_added_samples']}개, "
+                  f"표본 추출 {online['defense_training_draws']}회, "
+                  f"최근 버퍼 {online['latest_defense_replay_size']}개, "
+                  f"배치당 {online['latest_defense_rows_per_batch']}개")
     detail = summary["self_play_detail"]
     if detail["covered_iterations"]:
         print(

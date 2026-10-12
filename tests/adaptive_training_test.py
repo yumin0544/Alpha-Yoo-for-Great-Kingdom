@@ -99,6 +99,9 @@ class AdaptiveTrainingTest(unittest.TestCase):
         trainer.save_checkpoint(self.path)
         payload = torch.load(self.path, weights_only=True)
         payload["checkpoint_version"] = 7
+        payload.pop("capture_defense_replay")
+        for name in loop._CAPTURE_DEFENSE_CONFIG_KEYS:
+            payload["config"].pop(name)
         payload.pop("promotion_league")
         for name in loop._PROMOTION_CONFIG_KEYS:
             payload["config"].pop(name)

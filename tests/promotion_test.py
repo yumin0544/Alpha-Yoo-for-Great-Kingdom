@@ -301,6 +301,9 @@ class PromotionTest(unittest.TestCase):
         trainer.save_checkpoint(path)
         state = torch.load(path, weights_only=True)
         state["checkpoint_version"] = 8
+        state.pop("capture_defense_replay")
+        for name in loop._CAPTURE_DEFENSE_CONFIG_KEYS:
+            state["config"].pop(name)
         state.pop("promotion_league")
         for name in loop._PROMOTION_CONFIG_KEYS:
             state["config"].pop(name)
@@ -330,7 +333,7 @@ class PromotionTest(unittest.TestCase):
         path = self.root / "latest.pt"
         trainer.save_checkpoint(path)
         metadata = export_training_model(path, self.root / "export.pt")
-        self.assertEqual(metadata["source_checkpoint_version"], 9)
+        self.assertEqual(metadata["source_checkpoint_version"], 10)
         self.assertEqual(metadata["weights_sha256"], loop._model_digest(trainer.model))
 
     def test_compact_logs_and_analysis_keep_separate_primary_and_archive_results(self):

@@ -18,7 +18,15 @@ def compact_metric_row(row):
     """
     compact = deepcopy(row)
     report = compact.get("online_tactics")
-    if not isinstance(report, dict) or not report.get("records"):
+    if not isinstance(report, dict):
+        return compact
+    defense = report.get("capture_defense")
+    if isinstance(defense, dict) and "records" in defense:
+        # Reuse the same compact audit contract for the separate action-loss
+        # teacher. Full histories/certificates remain in its checkpoint replay.
+        defense_view = compact_metric_row({"online_tactics": defense})
+        report["capture_defense"] = defense_view["online_tactics"]
+    if not report.get("records"):
         return compact
     records = report.pop("records")
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
@@ -33,7 +41,8 @@ def compact_metric_row(row):
         depths[outcome][depth] += 1
         if record.get("budget_exhausted", False):
             exhausted[outcome] += 1
-        reason = record.get("excluded") or record.get("excluded_reason")
+        reason = (record.get("excluded") or record.get("excluded_reason")
+                  or record.get("exclusion_reason"))
         if reason:
             reasons[reason] += 1
         if record.get("training_label", False):
@@ -144,11 +153,14 @@ def _validate_online_tactics(row, *, prefix="Metrics row"):
     if "enabled" in report and type(report["enabled"]) is not bool:
         raise ValueError(f"{prefix} has invalid online_tactics.enabled")
     for name in ("added_samples", "excluded_shallow", "replay_size", "mixed_updates",
-                 "tactical_rows_per_batch", "replay_rows_per_batch"):
+                 "tactical_rows_per_batch", "replay_rows_per_batch",
+                 "proof_rows_per_batch", "defense_rows_per_batch"):
         if name in report and (type(report[name]) is not int or report[name] < 0):
             raise ValueError(f"{prefix} has invalid online_tactics.{name}")
     if "seconds" in report and not _finite_number(report["seconds"], positive=False):
         raise ValueError(f"{prefix} has invalid online_tactics.seconds")
+    if "capture_defense" in report:
+        _validate_online_tactics({"online_tactics": report["capture_defense"]}, prefix=prefix + ".capture_defense")
 
 
 def _online_tactics_summary(rows):
@@ -167,6 +179,12 @@ def _online_tactics_summary(rows):
         "latest_replay_size": latest.get("replay_size"),
         "latest_tactical_rows_per_batch": latest.get("tactical_rows_per_batch"),
         "latest_replay_rows_per_batch": latest.get("replay_rows_per_batch"),
+        "defense_added_samples": sum(report.get("capture_defense", {}).get("added_samples", 0)
+                                     for report in reports),
+        "defense_training_draws": sum(report.get("mixed_updates", 0)
+                                      * report.get("defense_rows_per_batch", 0) for report in reports),
+        "latest_defense_replay_size": latest.get("capture_defense", {}).get("replay_size"),
+        "latest_defense_rows_per_batch": latest.get("defense_rows_per_batch"),
     }
 
 

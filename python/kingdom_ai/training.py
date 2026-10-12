@@ -49,6 +49,15 @@ class ProofTrainingBatch(TrainingBatch):
 
 
 @dataclass(frozen=True)
+class CaptureDefenseBatch:
+    """Certified bad actions, with no invented parent value or safe-action target."""
+
+    features: torch.Tensor
+    legal_mask: torch.Tensor
+    losing_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
 class Losses:
     total: torch.Tensor
     policy: torch.Tensor
@@ -278,8 +287,8 @@ def mixed_policy_value_loss(logits, values, target_policy, target_value, legal_m
     }
 
 
-def train_mixed_step(model, optimizer, normal_batch: TrainingBatch | None,
-                     proof_batch: ProofTrainingBatch) -> dict[str, float]:
+def _train_proof_mixed_step(model, optimizer, normal_batch: TrainingBatch | None,
+                           proof_batch: ProofTrainingBatch) -> dict[str, float]:
     """One Adam update for normal replay plus masked certified WIN/LOSS rows."""
     if not isinstance(proof_batch, ProofTrainingBatch):
         raise TypeError("Teacher data requires a ProofTrainingBatch")
@@ -325,6 +334,133 @@ def train_mixed_step(model, optimizer, normal_batch: TrainingBatch | None,
                            ("teacher", slice(normal_rows, None))):
         for color, selected in (("black", black[subset]), ("white", ~black[subset])):
             errors = squared_error[subset][selected]
+            metrics[f"{prefix}_{color}_rows"] = errors.numel()
+            metrics[f"{prefix}_{color}_value_loss"] = errors.mean().item() if errors.numel() else 0.0
+    return metrics
+
+
+def capture_defense_policy_rows(logits, legal_mask, losing_mask):
+    """Stable negative-policy loss and bad-action probability, one per row.
+
+    The complement contains UNPROVED actions, not certified safe actions.
+    All-proved-losing positions have no justified avoidance target and are
+    rejected rather than fabricating a best defense or finite penalty.
+    """
+    if (not isinstance(logits, torch.Tensor) or logits.ndim != 2
+            or logits.shape[1] != ACTION_SIZE or logits.shape[0] < 1
+            or not logits.is_floating_point()):
+        raise ValueError("Defense logits must be floating-point [N, 82] with N > 0")
+    for name, mask in (("legal_mask", legal_mask), ("losing_mask", losing_mask)):
+        if (not isinstance(mask, torch.Tensor) or mask.layout != torch.strided
+                or mask.dtype != torch.bool or mask.shape != logits.shape
+                or mask.device != logits.device):
+            raise ValueError(f"Defense {name} must be bool [N, 82] on the logits device")
+    if not bool(torch.isfinite(logits).all()):
+        raise ValueError("Defense logits must be finite")
+    if bool((losing_mask & ~legal_mask).any()):
+        raise ValueError("Certified losing actions must be legal")
+    if not bool(losing_mask.any(dim=1).all()):
+        raise ValueError("Each defense row must contain a certified losing action")
+    alternatives = legal_mask & ~losing_mask
+    if not bool(alternatives.any(dim=1).all()):
+        raise ValueError("All-legal-actions-losing positions cannot train avoidance")
+    all_log_mass = torch.logsumexp(logits.masked_fill(~legal_mask, -torch.inf), dim=1)
+    alternative_log_mass = torch.logsumexp(
+        logits.masked_fill(~alternatives, -torch.inf), dim=1)
+    rows = (all_log_mass - alternative_log_mass).clamp_min(0)
+    bad_log_mass = torch.logsumexp(logits.masked_fill(~losing_mask, -torch.inf), dim=1)
+    bad_probability = (bad_log_mass - all_log_mass).exp().clamp(0, 1)
+    if not bool(torch.isfinite(rows).all()):
+        raise ValueError("Defense policy loss overflowed; check logits")
+    return rows, bad_probability
+
+
+def train_mixed_step(model, optimizer, normal_batch: TrainingBatch | None,
+                     proof_batch: ProofTrainingBatch | None = None, *,
+                     defense_batch: CaptureDefenseBatch | None = None) -> dict[str, float]:
+    """One update with a fixed TOTAL row denominator across all three sources.
+
+    Defense rows train only bad-action mass: no parent value label, no winning
+    move imitation and no addition to teacher WIN/LOSS counters. Without
+    defense rows the established proof-only implementation is unchanged.
+    """
+    if defense_batch is None:
+        return _train_proof_mixed_step(model, optimizer, normal_batch, proof_batch)
+    if not isinstance(defense_batch, CaptureDefenseBatch):
+        raise TypeError("Defense data requires a CaptureDefenseBatch")
+    if proof_batch is not None and not isinstance(proof_batch, ProofTrainingBatch):
+        raise TypeError("Teacher data requires a ProofTrainingBatch")
+    if (normal_batch is not None and (not isinstance(normal_batch, TrainingBatch)
+                                     or isinstance(normal_batch, ProofTrainingBatch))):
+        raise TypeError("Ordinary data requires a TrainingBatch")
+    from .capture_defense import validate_capture_defense_batch
+    validate_capture_defense_batch(defense_batch)
+    normal_rows = 0 if normal_batch is None else normal_batch.features.shape[0]
+    proof_rows = 0 if proof_batch is None else proof_batch.features.shape[0]
+    defense_rows = defense_batch.features.shape[0]
+    value_count = normal_rows + proof_rows
+    count = value_count + defense_rows
+    labelled_batches = [batch for batch in (normal_batch, proof_batch) if batch is not None]
+    batches = labelled_batches + [defense_batch]
+    features = torch.cat([batch.features for batch in batches], dim=0)
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    logits, values = model(features)
+    if logits.shape != (count, ACTION_SIZE) or values.shape != (count,):
+        raise ValueError("Model must return logits [N, 82] and values [N]")
+    zero = logits.sum() * 0.0
+    if value_count:
+        batch = TrainingBatch(*(torch.cat([getattr(row, field) for row in labelled_batches], dim=0)
+                                for field in ("features", "legal_mask", "policy", "value")))
+        enabled = (torch.ones(normal_rows, dtype=torch.bool, device=logits.device)
+                   if proof_batch is None else torch.cat((
+                       torch.ones(normal_rows, dtype=torch.bool, device=logits.device),
+                       proof_batch.policy_enabled)))
+        if proof_rows:
+            losses = mixed_policy_value_loss(logits[:value_count], values[:value_count],
+                batch.policy, batch.value, batch.legal_mask, normal_rows=normal_rows,
+                policy_enabled=enabled)
+        else:
+            policy_rows, value_rows = _policy_value_rows(logits[:value_count],
+                values[:value_count], batch.policy, batch.value, batch.legal_mask)
+            losses = {"loss": policy_rows.mean() + value_rows.mean(),
+                      "policy_loss": policy_rows.mean(), "value_loss": value_rows.mean(),
+                      "normal_policy_loss": policy_rows.mean(), "normal_value_loss": value_rows.mean(),
+                      "teacher_policy_loss": zero, "teacher_value_loss": zero,
+                      "teacher_win_value_loss": zero, "teacher_loss_value_loss": zero}
+        losses["policy_loss"] = losses["policy_loss"] * (value_count / count)
+        losses["value_loss"] = losses["value_loss"] * (value_count / count)
+    else:
+        batch = None
+        losses = {key: zero for key in ("loss", "policy_loss", "value_loss",
+            "normal_policy_loss", "normal_value_loss", "teacher_policy_loss",
+            "teacher_value_loss", "teacher_win_value_loss", "teacher_loss_value_loss")}
+    defense_losses, bad_probability = capture_defense_policy_rows(
+        logits[value_count:], defense_batch.legal_mask, defense_batch.losing_mask)
+    losses["defense_policy_loss"] = defense_losses.mean()
+    losses["defense_bad_probability"] = bad_probability.mean()
+    losses["policy_loss"] = losses["policy_loss"] + defense_losses.sum() / count
+    losses["loss"] = losses["policy_loss"] + losses["value_loss"]
+    losses["loss"].backward()
+    if any(parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all())
+           for parameter in model.parameters()):
+        optimizer.zero_grad(set_to_none=True)
+        raise RuntimeError("Non-finite model gradients")
+    optimizer.step()
+    teacher_win_rows = 0 if proof_batch is None else int(proof_batch.policy_enabled.sum().item())
+    metrics = {key: value.detach().item() for key, value in losses.items()}
+    metrics.update({"normal_rows": normal_rows, "teacher_rows": proof_rows,
+                    "teacher_policy_rows": teacher_win_rows, "teacher_win_rows": teacher_win_rows,
+                    "teacher_loss_rows": proof_rows - teacher_win_rows, "defense_rows": defense_rows,
+                    "actual_tactical_fraction": (proof_rows + defense_rows) / count})
+    if value_count:
+        black = batch.features[:, 5, 0, 0] == 1
+        squared_error = (values[:value_count].detach() - batch.value).square()
+    for prefix, subset in (("normal", slice(0, normal_rows)),
+                           ("teacher", slice(normal_rows, value_count))):
+        for color in ("black", "white"):
+            errors = (squared_error[subset][black[subset] if color == "black" else ~black[subset]]
+                      if value_count else torch.empty(0))
             metrics[f"{prefix}_{color}_rows"] = errors.numel()
             metrics[f"{prefix}_{color}_value_loss"] = errors.mean().item() if errors.numel() else 0.0
     return metrics

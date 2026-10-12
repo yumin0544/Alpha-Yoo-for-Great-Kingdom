@@ -54,6 +54,12 @@ def main():
     parser.add_argument("--online-tactics-include-loss", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="새 LOSS 증명을 가치 전용 자료로 수집 (기본 꺼짐; 기존 자료 보존)")
+    parser.add_argument("--online-tactics-capture-defense", action=argparse.BooleanOptionalAction,
+                        default=None, help="포획·자충 패배 수순의 증명된 위험 착수를 별도 정책 반례로 학습")
+    parser.add_argument("--online-tactics-defense-fraction", type=float, default=None,
+                        help="전체 전술 표본/생성 시간 중 회피 자료 비율 (기본 0.5; 일반 학습량 유지)")
+    parser.add_argument("--online-tactics-defense-replay-capacity", type=positive_integer,
+                        default=None, help="증명된 위험 착수 반례 FIFO 용량 (기본 1024)")
     parser.add_argument("--online-tactics-max-cases", type=positive_integer, default=None,
                         help="사이클당 CPU 전술 탐색 위치 상한 (새 학습 기본 32)")
     parser.add_argument("--online-tactics-max-depth", type=positive_integer, default=None,
@@ -191,6 +197,10 @@ def main():
     )
     print(json.dumps(asdict(trainer.config), ensure_ascii=False))
     print("평가 승률은 현재 기준 모델에 대한 결과이며, 절대 기력은 별도 검증해야 합니다.")
+    if trainer.config.online_tactics_capture_defense:
+        print(f"포획 회피 학습: 실제 패배 착수를 최대 {min(30, trainer.config.online_tactics_max_depth)}수 "
+              "강제 승패 증명으로 검증하고 부정 정책만 학습합니다. "
+              "GPU 자가 대국의 모든 착수에 30수 탐색을 추가하는 설정은 아닙니다.", flush=True)
     if trainer.config.promotion_archive_dir is not None:
         print(f"승격: 현 챔피언 상대 {trainer.config.promotion_threshold:.0%} 이상 → "
               f"과거 버전마다 두 모델 각각 {trainer.config.promotion_archive_games}판 → "
@@ -202,6 +212,11 @@ def main():
         trainer.export_champion(best)
         trainer.export_learner(candidate)
         evaluation = row["evaluation"]
+        defense = row.get("online_tactics", {}).get("capture_defense")
+        if defense is not None:
+            print(f"포획 회피: 새 반례 {defense['added_samples']}개, 미확정 "
+                  f"{defense.get('excluded_unknown', 0)}개, 버퍼 {defense['replay_size']}개, "
+                  f"배치당 {row['online_tactics']['defense_rows_per_batch']}개", flush=True)
         print(
             f"반복 {row['iteration']}: 자가 대국 누적 {row['self_play_games']}판, "
             f"버퍼 {row['replay_size']}개, 손실 {row['loss']:.5f}, "

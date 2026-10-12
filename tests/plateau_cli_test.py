@@ -131,6 +131,31 @@ class PlateauCLITest(unittest.TestCase):
         self.assertEqual(config.online_tactics_generation_seconds, 30.0)
         self.assertIn('"online_tactics_max_depth": 20', output)
 
+    def test_capture_defense_reconfigure_forwards_explicit_depth_budgets_and_fixed_mix(self):
+        self.trainer.config = replace(self.trainer.config, online_tactics=True)
+        code, output, error, _ = self.invoke("--resume", self.source,
+            "--reconfigure", "--prepare-only", "--online-tactics-capture-defense",
+            "--online-tactics-max-depth", "30", "--online-tactics-max-nodes", "4000000",
+            "--online-tactics-time-limit-ms", "4000", "--online-tactics-generation-seconds", "60",
+            "--online-tactics-fraction", "0.05", "--train-steps", "512")
+        self.assertEqual(code, 0, error)
+        self.assertEqual(self.trainer.overrides, {
+            "online_tactics_capture_defense": True, "online_tactics_max_depth": 30,
+            "online_tactics_max_nodes": 4000000, "online_tactics_time_limit_ms": 4000,
+            "online_tactics_generation_seconds": 60.0, "online_tactics_fraction": 0.05,
+            "train_steps_per_iteration": 512})
+        self.assertIn("포획 회피 학습", output)
+        self.assertIn("모든 착수에 30수 탐색을 추가하는 설정은 아닙니다", output)
+        self.assertNotIn("run", [event[0] for event in self.trainer.events])
+
+    def test_capture_defense_requires_online_teacher_and_explicit_resume_reconfigure(self):
+        for arguments in (("--prepare-only", "--online-tactics-capture-defense"),
+                          ("--resume", self.source, "--online-tactics-capture-defense")):
+            with self.subTest(arguments=arguments):
+                code, _, error, _ = self.invoke(*arguments)
+                self.assertEqual(code, 2)
+                self.assertTrue(error)
+
     def test_resume_preserves_saved_nine_ply_cap_until_explicit_reconfigure(self):
         self.trainer.config = replace(self.trainer.config, online_tactics=True,
                                       online_tactics_max_depth=9)
