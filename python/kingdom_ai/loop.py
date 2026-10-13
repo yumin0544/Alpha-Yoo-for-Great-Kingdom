@@ -639,7 +639,12 @@ class Trainer:
                 defense_report.update(enabled=True, added_samples=len(defense_samples),
                     replay_size=len(self.capture_defense_replay),
                     sampled_games=defense_miner.sampled_games,
-                    candidate_count=defense_miner.candidate_count)
+                    candidate_count=defense_miner.candidate_count,
+                    selection="risk_only_own_liberties_v1",
+                    risk_liberty_threshold=3,
+                    scanned_decisions=defense_miner.scanned_decisions,
+                    risky_decisions=defense_miner.risky_decisions,
+                    quiet_decisions=defense_miner.quiet_decisions)
                 online_report["capture_defense"] = defense_report
                 # Both teachers share one cycle budget, including replay/mining
                 # overhead. Unused defense time is available to WIN/LOSS proofs.

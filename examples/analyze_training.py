@@ -73,6 +73,11 @@ def main():
                   f"표본 추출 {online['defense_training_draws']}회, "
                   f"최근 버퍼 {online['latest_defense_replay_size']}개, "
                   f"배치당 {online['latest_defense_rows_per_batch']}개")
+            if online["defense_scanned_decisions"]:
+                print(f"위험 위치 선별: 검사 {online['defense_scanned_decisions']}개 중 "
+                      f"위험 {online['defense_risky_decisions']}개, "
+                      f"조용한 위치 제외 {online['defense_quiet_decisions']}개, "
+                      f"실제 증명 탐색 {online['defense_solver_positions']}위치")
     detail = summary["self_play_detail"]
     if detail["covered_iterations"]:
         print(

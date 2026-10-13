@@ -198,7 +198,8 @@ def main():
     print(json.dumps(asdict(trainer.config), ensure_ascii=False))
     print("평가 승률은 현재 기준 모델에 대한 결과이며, 절대 기력은 별도 검증해야 합니다.")
     if trainer.config.online_tactics_capture_defense:
-        print(f"포획 회피 학습: 실제 패배 착수를 최대 {min(30, trainer.config.online_tactics_max_depth)}수 "
+        print(f"포획 회피 학습: 착수 전후 자기 무리 활로가 3개 이하이거나 즉시 패배하는 위치만 골라 "
+              f"최대 {min(30, trainer.config.online_tactics_max_depth)}수 "
               "강제 승패 증명으로 검증하고 부정 정책만 학습합니다. "
               "GPU 자가 대국의 모든 착수에 30수 탐색을 추가하는 설정은 아닙니다.", flush=True)
     if trainer.config.promotion_archive_dir is not None:
@@ -216,7 +217,10 @@ def main():
         if defense is not None:
             print(f"포획 회피: 새 반례 {defense['added_samples']}개, 미확정 "
                   f"{defense.get('excluded_unknown', 0)}개, 버퍼 {defense['replay_size']}개, "
-                  f"배치당 {row['online_tactics']['defense_rows_per_batch']}개", flush=True)
+                  f"배치당 {row['online_tactics']['defense_rows_per_batch']}개, "
+                  f"위험/검사 {defense.get('risky_decisions', 0)}/"
+                  f"{defense.get('scanned_decisions', 0)}개, "
+                  f"조용한 위치 제외 {defense.get('quiet_decisions', 0)}개", flush=True)
         print(
             f"반복 {row['iteration']}: 자가 대국 누적 {row['self_play_games']}판, "
             f"버퍼 {row['replay_size']}개, 손실 {row['loss']:.5f}, "

@@ -154,7 +154,9 @@ def _validate_online_tactics(row, *, prefix="Metrics row"):
         raise ValueError(f"{prefix} has invalid online_tactics.enabled")
     for name in ("added_samples", "excluded_shallow", "replay_size", "mixed_updates",
                  "tactical_rows_per_batch", "replay_rows_per_batch",
-                 "proof_rows_per_batch", "defense_rows_per_batch"):
+                 "proof_rows_per_batch", "defense_rows_per_batch",
+                 "scanned_decisions", "risky_decisions", "quiet_decisions",
+                 "solver_positions", "solver_calls", "excluded_low_risk"):
         if name in report and (type(report[name]) is not int or report[name] < 0):
             raise ValueError(f"{prefix} has invalid online_tactics.{name}")
     if "seconds" in report and not _finite_number(report["seconds"], positive=False):
@@ -185,6 +187,14 @@ def _online_tactics_summary(rows):
                                       * report.get("defense_rows_per_batch", 0) for report in reports),
         "latest_defense_replay_size": latest.get("capture_defense", {}).get("replay_size"),
         "latest_defense_rows_per_batch": latest.get("defense_rows_per_batch"),
+        "defense_scanned_decisions": sum(report.get("capture_defense", {}).get("scanned_decisions", 0)
+                                        for report in reports),
+        "defense_risky_decisions": sum(report.get("capture_defense", {}).get("risky_decisions", 0)
+                                      for report in reports),
+        "defense_quiet_decisions": sum(report.get("capture_defense", {}).get("quiet_decisions", 0)
+                                      for report in reports),
+        "defense_solver_positions": sum(report.get("capture_defense", {}).get("solver_positions", 0)
+                                        for report in reports),
     }
 
 

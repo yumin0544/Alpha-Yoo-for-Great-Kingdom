@@ -38,6 +38,33 @@ def row(iteration, *, samples=200, games=10, self_play=2.0, elapsed=5.0):
 
 
 class MetricsTest(unittest.TestCase):
+    def test_risk_selection_counts_survive_compaction_and_legacy_rows(self):
+        value = row(2)
+        defense = {"enabled": True, "scanned_decisions": 13, "risky_decisions": 10,
+                   "quiet_decisions": 3, "solver_positions": 1, "solver_calls": 2,
+                   "excluded_low_risk": 1, "replay_size": 4,
+                   "records": [{"outcome": "LOW_RISK", "training_label": False,
+                                "exclusion_reason": "low_risk_heuristic"}]}
+        value["online_tactics"] = {"enabled": True, "capture_defense": defense}
+        compact = compact_metric_row(value)
+        self.assertEqual(compact["online_tactics"]["capture_defense"]["scanned_decisions"], 13)
+        self.assertEqual(compact["online_tactics"]["capture_defense"]["record_summary"][
+            "exclusion_reasons"], {"low_risk_heuristic": 1})
+        online = summarize_metrics([row(1), compact])["online_tactics"]
+        for field, expected in (("scanned_decisions", 13), ("risky_decisions", 10),
+                                ("quiet_decisions", 3), ("solver_positions", 1)):
+            self.assertEqual(online[f"defense_{field}"], expected)
+        self.assertEqual(summarize_metrics([value]), summarize_metrics([compact]))
+
+    def test_invalid_risk_selection_counts_are_rejected(self):
+        for field in ("scanned_decisions", "risky_decisions", "quiet_decisions",
+                      "solver_positions", "solver_calls", "excluded_low_risk"):
+            for invalid in (-1, True, 1.5):
+                value = row(1)
+                value["online_tactics"] = {"capture_defense": {field: invalid}}
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(ValueError):
+                    summarize_metrics([value])
+
     def test_compact_teacher_records_preserves_counts_without_mutating_source(self):
         full = row(1)
         full["online_tactics"] = {"enabled": True, "added_samples": 2, "max_depth": 20,

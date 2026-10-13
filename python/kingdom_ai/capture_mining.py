@@ -15,7 +15,7 @@ from time import perf_counter
 import torch
 import my_board_engine as engine
 
-from .encoding import ACTION_SIZE, PASS_ACTION, action_to_move, encode_state, move_to_action
+from .encoding import ACTION_SIZE, PASS_ACTION, _check_rules, action_to_move, encode_state, move_to_action
 from .tactical_positions import load_position as _load_position
 from .tactics import analyze_tactics
 from .training import GameData
@@ -23,6 +23,51 @@ from .training import GameData
 
 _SLOTS = ("pre_trap", "earlier_defense", "early_error", "last_decision")
 _DEPTH_LADDER = (1, 3, 5, 9, 15, 21, 29)
+
+
+def _own_liberties(state, actor):
+    """Cheap chain scan, not move enumeration or a life/death certificate."""
+    board = state.board
+    visited, counts = set(), []
+    for index, cell in enumerate(board.cells):
+        if cell != actor or index in visited:
+            continue
+        point = engine.Board.position(index)
+        visited.update(engine.Board.index(member) for member in board.group_at(point))
+        counts.append(len(board.liberties(point)))
+    return counts
+
+
+def _risk_from_liberties(before, after, result, actor):
+    if result.finished() and result.winner == actor:
+        return None
+    reasons = []
+    if any(count <= 3 for count in before):
+        reasons.append("own_chain_at_most_three_liberties")
+    if any(count <= 3 for count in after):
+        reasons.append("played_action_leaves_low_liberty_chain")
+    if result.finished() and result.winner != actor:
+        reasons.append("played_action_loses_immediately")
+    if not reasons:
+        return None
+    return {"heuristic": "own_liberties_v1", "threshold": 3,
+            "own_min_before": min(before, default=None),
+            "own_min_after": min(after, default=None),
+            "own_low_chains_before": sum(count <= 3 for count in before),
+            "own_low_chains_after": sum(count <= 3 for count in after),
+            "reasons": reasons, "is_proof": False}
+
+
+def _capture_risk(before, after):
+    """Gate expensive certification; UNKNOWN/quiet are never called safe.
+
+    Include the actual successor, so a quiet parent's move that creates a
+    vulnerable group is not missed. Group size is deliberately irrelevant:
+    losing a single stone ends this game too. Never mutate either state.
+    """
+    actor = before.to_play
+    return _risk_from_liberties(_own_liberties(before, actor),
+                                _own_liberties(after, actor), after.result, actor)
 
 
 def _integer(value, name, minimum=0):
@@ -51,8 +96,10 @@ class CaptureDefenseMiner:
     """Uniform reservoir of capture/suicide games, then stratified decisions.
 
     ``add_game`` never replays a state or decodes feature tensors.  ``cases``
-    checks the complete authoritative replay and records pre-move histories of
-    the losing colour within the final ``lookback_plies`` individual turns.
+    checks the complete authoritative replay and cheaply screens every losing
+    decision within the final ``lookback_plies`` individual turns. Only positions
+    with an own chain of at most three liberties before/after the played action,
+    or an immediate terminal loss, can consume a deep solver budget.
     Decisions before the final unavoidable atari are scheduled before the last
     decision; their role rotates across games/cycles to retain temporal diversity.
     At most ``2 * max_cases`` game histories and four candidates per game remain.
@@ -75,6 +122,9 @@ class CaptureDefenseMiner:
         self.seen_games = 0
         self.seen_losses = 0
         self.candidate_count = 0
+        self.scanned_decisions = 0
+        self.risky_decisions = 0
+        self.quiet_decisions = 0
         self._games = []
         self._cached_cases = None
 
@@ -114,6 +164,7 @@ class CaptureDefenseMiner:
                 self._games[slot] = record
         self._cached_cases = None
         self.candidate_count = 0
+        self.scanned_decisions = self.risky_decisions = self.quiet_decisions = 0
 
     def _game_candidates(self, record):
         state = engine.State()
@@ -123,24 +174,34 @@ class CaptureDefenseMiner:
         for ply, action in enumerate(record.history):
             if state.result.finished():
                 raise ValueError(f"Game {record.index} continues after termination")
-            if ply >= first_ply and state.to_play == loser:
-                decisions.append((ply, action))
+            examine = ply >= first_ply and state.to_play == loser
+            before = _own_liberties(state, loser) if examine else None
             if not state.play(action_to_move(action)).accepted():
                 raise ValueError(f"Game {record.index} action {ply + 1} is rejected")
+            if examine:
+                self.scanned_decisions += 1
+                risk = _risk_from_liberties(before, _own_liberties(state, loser),
+                                            state.result, loser)
+                if risk is None:
+                    self.quiet_decisions += 1
+                else:
+                    self.risky_decisions += 1
+                    decisions.append((ply, action, risk))
         if (not state.result.finished() or state.result.winner != record.winner
                 or state.result.reason != record.reason):
             raise ValueError(f"Game {record.index} terminal result disagrees with its history")
         if not decisions:
             return []
-        # Actual decisions, not guessed danger labels. Prefer the preceding
-        # move (a common four-ply trap) and a still earlier defensive decision.
+        # Temporal roles now refer to eligible risky decisions, not arbitrary
+        # quiet turns. Retain onset/earlier coverage instead of ranking only
+        # the final atari, where a defense may already be impossible.
         selected = {"pre_trap": max(0, len(decisions) - 2),
                     "earlier_defense": max(0, len(decisions) - 4),
                     "early_error": 0, "last_decision": len(decisions) - 1}
         candidates, seen = [], set()
         family = f"capture_cycle_{self.iteration}_game_{record.index}"
         for slot in _SLOTS:
-            ply, action = decisions[selected[slot]]
+            ply, action, risk = decisions[selected[slot]]
             if ply in seen:
                 continue
             seen.add(ply)
@@ -153,7 +214,8 @@ class CaptureDefenseMiner:
                            "plies_to_end": len(record.history) - ply, "bad_action": action,
                            "loser": loser.name, "recorded_end_reason": record.reason.name,
                            "selection_slot": slot,
-                           "selection": "Observed losing-side decision; action outcome unproved"},
+                           "risk": risk,
+                           "selection": "Low-liberty risk heuristic only; action outcome unproved"},
             })
         offset = (self.iteration + record.index) % len(candidates)
         return candidates[offset:] + candidates[:offset]
@@ -161,6 +223,7 @@ class CaptureDefenseMiner:
     def cases(self):
         if self._cached_cases is not None:
             return deepcopy(self._cached_cases)
+        self.scanned_decisions = self.risky_decisions = self.quiet_decisions = 0
         families = [self._game_candidates(record) for record in self._games]
         self.candidate_count = sum(map(len, families))
         selected = []
@@ -193,7 +256,10 @@ def collect_capture_defense_samples(cases, options, *, max_cases=32,
     Remaining overall time bounds each solver call by default. State loading and
     OS scheduling overhead are not a hard real-time guarantee. Fully immediate-
     losing parent states are excluded: their final move is not a useful defense
-    choice to penalize. UNKNOWN never creates a sample or a parent value label.
+    choice to penalize. Quiet before/after positions are excluded before even
+    the shallow move enumeration. Risk is recomputed from authoritative states,
+    never trusted from case metadata, and is not a training label. UNKNOWN never
+    creates a sample or a parent value label.
     """
     from .capture_defense import CertifiedDefenseSample
 
@@ -241,21 +307,29 @@ def collect_capture_defense_samples(cases, options, *, max_cases=32,
             raise TypeError("Position loader must return an engine State")
         if state.result.finished() or state.to_play.name != source["loser"]:
             raise ValueError("Capture prefix must be nonterminal and the losing colour's turn")
-        encoded = encode_state(state)
-        if not bool(encoded.legal_mask[action]):
-            raise ValueError("Recorded capture action is not legal at its prefix")
+        _check_rules(state)
         record = {"id": case_id, "family_id": family, "source": deepcopy(source),
                   "position": deepcopy(case["position"]), "actor": state.to_play.name,
                   "selected_action": action, "outcome": "UNKNOWN", "training_label": False,
                   "max_depth": options.max_depth, "nodes": 0, "calls": [],
                   "budget_exhausted": False}
+        after = state.copy()
+        if not after.play(action_to_move(action)).accepted():
+            raise ValueError("Engine rejected the recorded legal capture action")
+        if after.result.finished() and after.result.winner == state.to_play:
+            record.update(outcome="ACTION_WIN", terminal_reason=after.result.reason.name)
+            records.append(record)
+            continue
+        risk = _capture_risk(state, after)
+        if risk is None:
+            record.update(outcome="LOW_RISK", exclusion_reason="low_risk_heuristic")
+            records.append(record)
+            continue
+        record["risk"] = risk
         if not analyze_tactics(state).safe_actions:
             record["outcome"] = "ALREADY_FORCED_LOSS"
             records.append(record)
             continue
-        after = state.copy()
-        if not after.play(action_to_move(action)).accepted():
-            raise ValueError("Engine rejected the recorded legal capture action")
         certified_depth = None
         if after.result.finished():
             record["terminal_reason"] = after.result.reason.name
@@ -319,6 +393,9 @@ def collect_capture_defense_samples(cases, options, *, max_cases=32,
                         record["outcome"] = "ACTION_WIN"
                     break
         if certified_depth is not None:
+            # Quiet/UNKNOWN records do not need training tensors. Only real
+            # proofs pay for encoding and its additional legal-move scan.
+            encoded = encode_state(state)
             losing_mask = torch.zeros(ACTION_SIZE, dtype=torch.bool)
             losing_mask[action] = True
             if not bool((encoded.legal_mask & ~losing_mask).any()):
@@ -337,4 +414,7 @@ def collect_capture_defense_samples(cases, options, *, max_cases=32,
                      "excluded_already_forced": sum(row["outcome"] == "ALREADY_FORCED_LOSS"
                                                     for row in records),
                      "excluded_action_win": sum(row["outcome"] == "ACTION_WIN" for row in records),
+                     "excluded_low_risk": sum(row["outcome"] == "LOW_RISK" for row in records),
+                     "solver_positions": sum(bool(row["calls"]) for row in records),
+                     "solver_calls": sum(len(row["calls"]) for row in records),
                      "generation_seconds": perf_counter() - started, "records": records}

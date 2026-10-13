@@ -12,10 +12,11 @@ import torch
 
 from kingdom_ai import PolicyValueNet, Trainer, TrainingConfig
 from kingdom_ai.capture_defense import CertifiedDefenseSample
-from kingdom_ai.encoding import encode_state
+from kingdom_ai.encoding import action_to_move, encode_state
 from kingdom_ai.evaluation import EvaluationResult
 from kingdom_ai.metrics import compact_metric_row
 from kingdom_ai.tactical_training import CertifiedTacticalSample
+from kingdom_ai.tactical_positions import user_game_two_positions
 from kingdom_ai.training import GameData, TrainingSample
 import kingdom_ai.loop as loop
 
@@ -106,6 +107,38 @@ class CaptureDefenseLoopTest(unittest.TestCase):
         self.assertEqual(collect.call_args.args[1].max_depth, 30)
         self.assertEqual(collect.call_args.kwargs["generation_seconds"], 15)
         self.assertIn("self_play_actor", trainer.capture_defense_replay.state_dict()["certificates"][0]["proof"])
+
+    def test_actual_risky_game_reaches_teacher_and_reports_screening_counts(self):
+        history = user_game_two_positions()[-1]["position"]["history"] + [[6, 2]]
+        actions = tuple((point[0] - 1) * 9 + point[1] - 1 for point in history)
+        state, positions = engine.State(), []
+        for action in actions:
+            positions.append(encode_state(state))
+            self.assertTrue(state.play(action_to_move(action)).accepted())
+        samples = []
+        for encoded, action in zip(positions, actions):
+            policy = torch.zeros(82)
+            policy[action] = 1
+            samples.append(TrainingSample(encoded.features, encoded.legal_mask, policy,
+                1.0 if encoded.to_play == state.result.winner else -1.0, encoded.to_play))
+        actual_game = GameData(samples, state.result.winner, state.result.reason, actions)
+        trainer = self.trainer(online_tactics_generation_seconds=0.8,
+                               online_tactics_time_limit_ms=100,
+                               online_tactics_max_nodes=100000)
+        with patch.object(trainer, "_collect_games", return_value=iter((actual_game, game()))), \
+             patch.object(loop, "evaluate_models", return_value=EvaluationResult(
+                 2, 0, 2, 0, 0, 4, {"TwoPasses": 2})):
+            metrics = trainer.run_iteration()
+        report = metrics["online_tactics"]["capture_defense"]
+        self.assertEqual(report["selection"], "risk_only_own_liberties_v1")
+        self.assertEqual(report["risk_liberty_threshold"], 3)
+        self.assertEqual((report["scanned_decisions"], report["risky_decisions"],
+                          report["quiet_decisions"]), (13, 10, 3))
+        self.assertEqual(report["cases_available"], 4)
+        self.assertGreater(report["solver_positions"], 0)
+        self.assertEqual(report["excluded_low_risk"], 0)
+        self.assertTrue(all("risk" in record["source"] for record in report["records"]))
+        self.assertEqual((trainer.self_play_games, trainer.training_steps), (2, 2))
 
     def test_defense_only_and_proof_only_reassign_reserved_teacher_rows(self):
         for proofs, defenses, expected in ((False, True, (0, 4)), (True, False, (4, 0)),
