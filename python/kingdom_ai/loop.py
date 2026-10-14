@@ -48,6 +48,7 @@ class TrainingConfig:
     evaluation_opening_moves: int = 6
     evaluation_opening_temperature: float = 1.0
     promotion_threshold: float = 0.55
+    # Retained only for v9/v10 checkpoint compatibility; Trainer ignores them.
     promotion_archive_dir: str | None = None
     promotion_archive_games: int = 100
     seed: int = 42
@@ -360,6 +361,8 @@ class Trainer:
     The learner keeps its optimizer and
     continues training even when evaluation rejects promotion. A failed or
     interrupted iteration must be discarded by loading the last checkpoint.
+    Promotion uses only the current champion duel. Historical archive fields
+    and saved opponent/cache state are accepted solely for legacy compatibility.
     """
 
     def __init__(self, config=TrainingConfig(), model=None, device="cpu", evaluation_workers=1,
@@ -378,11 +381,15 @@ class Trainer:
             raise ValueError("evaluation_leaf_batch_size must be a positive integer")
         if type(evaluation_reuse_tree) is not bool:
             raise ValueError("evaluation_reuse_tree must be a bool")
+        if type(promotion_archive_allow_additions) is not bool:
+            raise ValueError("promotion_archive_allow_additions must be a bool")
+        # Historical comparison is retired even for old active checkpoints.
+        # Remember the old path ONLY to protect it from CLI output writes.
+        self.retired_promotion_archive_dir = config.promotion_archive_dir
+        config = replace(config, promotion_archive_dir=None)
         self.config = config
         self.promotion_league = PromotionLeague(
-            config.promotion_archive_dir, games=config.promotion_archive_games,
-            seed=config.seed, state=promotion_league_state,
-            allow_additions=promotion_archive_allow_additions)
+            None, games=config.promotion_archive_games, seed=config.seed)
         self.device = torch.device(device)
         # Parallel batching can change floating-point scheduling, so preserve
         # this operational setting in checkpoints even though it is not part of
@@ -467,6 +474,8 @@ class Trainer:
             config = replace(self.config, **overrides)
         except TypeError as error:
             raise ValueError("Unknown training configuration field") from error
+        retired_archive = config.promotion_archive_dir or self.retired_promotion_archive_dir
+        config = replace(config, promotion_archive_dir=None)
         if config.self_play_backend == "cuda" and self.device.type != "cuda":
             raise ValueError("CUDA self-play requires a CUDA Trainer device")
         if config.online_tactics:
@@ -479,7 +488,7 @@ class Trainer:
             raise ValueError("Cannot resize a nonempty capture defense replay")
         league = self.promotion_league
         if _PROMOTION_CONFIG_KEYS.intersection(overrides):
-            league = PromotionLeague(config.promotion_archive_dir,
+            league = PromotionLeague(None,
                                      games=config.promotion_archive_games, seed=config.seed)
         # Validation above completes before changing any owned state.
         if config.train_steps_per_iteration != self.config.train_steps_per_iteration:
@@ -494,6 +503,7 @@ class Trainer:
         if config.online_tactics_defense_replay_capacity != self.capture_defense_replay.capacity:
             self.capture_defense_replay = CaptureDefenseReplay(config.online_tactics_defense_replay_capacity)
         self.config = config
+        self.retired_promotion_archive_dir = retired_archive
         self.promotion_league = league
         for group in self.optimizer.param_groups:
             group["lr"] = config.learning_rate
@@ -548,7 +558,6 @@ class Trainer:
     def run_iteration(self):
         if not self._at_boundary:
             raise RuntimeError("Reload the last checkpoint after an incomplete iteration")
-        self.promotion_league.check_unchanged()
         self._at_boundary = False
         self._synchronize()
         started = perf_counter()
@@ -764,19 +773,14 @@ class Trainer:
             **evaluation_options,
         )
         gate_passed = evaluation.win_rate >= config.promotion_threshold
-        promotion_report = self.promotion_league.skipped_report(gate_passed)
+        # No archive discovery, hashing, cache restoration or extra games.
+        promotion_report = {
+            "enabled": False, "gate_passed": gate_passed, "rule": "head_to_head_only",
+            "evaluated": False, "opponent_count": 0, "actual_games_played": 0,
+            "seconds": 0.0,
+            "reason": "head_to_head_passed" if gate_passed else "head_to_head_rejected",
+        }
         promoted = gate_passed
-        if gate_passed and config.promotion_archive_dir is not None:
-            promotion_report = self.promotion_league.compare(
-                self.model, self.champion, evaluator=evaluate_models,
-                simulations=config.evaluation_simulations, c_puct=config.c_puct,
-                opening_moves=config.evaluation_opening_moves,
-                opening_temperature=config.evaluation_opening_temperature,
-                workers=self.evaluation_workers, backend=self.evaluation_backend,
-                leaf_batch_size=self.evaluation_leaf_batch_size,
-                reuse_tree=self.evaluation_reuse_tree,
-                tactical_checks=config.self_play_tactical_checks)
-            promoted = promotion_report["passed"]
         if promoted:
             self.champion = deepcopy(self.model).eval()
             self.champion_version += 1
@@ -928,8 +932,6 @@ class Trainer:
         if not isinstance(raw_config, dict) or set(raw_config) != config_keys:
             raise ValueError("Invalid checkpoint training configuration")
         config = TrainingConfig(**raw_config)
-        if refresh_promotion_archive and (version < 9 or config.promotion_archive_dir is None):
-            raise ValueError("Archive refresh requires a checkpoint with an enabled pinned promotion archive")
         progress = payload["progress"]
         expected_progress = (_PROGRESS_KEYS if version >= 8 else _PROGRESS_KEYS_V6 if version >= 6
                              else _PROGRESS_KEYS_V5)
@@ -1012,9 +1014,9 @@ class Trainer:
             "evaluation_reuse_tree": evaluation_reuse_tree,
         }
         saved_runtime.update({name: value for name, value in requested_runtime.items() if value is not None})
-        trainer = cls(config, model=model, device=device, **saved_runtime,
-                      promotion_league_state=payload["promotion_league"] if version >= 9 else None,
-                      promotion_archive_allow_additions=refresh_promotion_archive)
+        # The legacy promotion state/refresh argument cannot reactivate retired
+        # comparisons or require any archived files to exist.
+        trainer = cls(config, model=model, device=device, **saved_runtime)
         trainer.champion = champion.to(trainer.device).eval()
         trainer.optimizer.load_state_dict(payload["optimizer"])
         trainer.replay = replay

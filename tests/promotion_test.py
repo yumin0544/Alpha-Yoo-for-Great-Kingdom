@@ -1,4 +1,4 @@
-"""Historical average gate, immutable originals and exact cache/resume provenance."""
+"""Head-to-head-only promotion and compatibility with retired archive state."""
 
 from contextlib import redirect_stdout
 import importlib.util
@@ -98,31 +98,31 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual(metrics["promotion_league"]["reason"], "head_to_head_rejected")
         self.assertIsNone(trainer.promotion_league.reference_cache)
 
-    def test_gate_equal_fifty_five_percent_promotes_only_on_higher_average(self):
+    def test_gate_equal_fifty_five_percent_promotes_without_archive_duels(self):
         trainer = self.trainer()
         metrics, evaluate = self.run_cycle(trainer, [result(22, 40), result(60), result(60),
                                                     result(65), result(58)])
         self.assertTrue(metrics["promoted"])
         self.assertEqual(trainer.champion_version, 1)
         report = metrics["promotion_league"]
-        self.assertEqual(report["actual_games_played"], 400)
-        self.assertEqual(report["candidate_mean_win_rate"], 0.615)
-        self.assertEqual(report["reference_mean_win_rate"], 0.6)
-        self.assertEqual(evaluate.call_count, 5)
-        # A worse result against one opponent does not veto a higher mean.
-        self.assertEqual(report["results"][1]["candidate"]["wins"], 58)
+        self.assertEqual(report["actual_games_played"], 0)
+        self.assertFalse(report["enabled"])
+        self.assertFalse(report["evaluated"])
+        self.assertEqual(report["rule"], "head_to_head_only")
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertNotIn("results", report)
         self.assertEqual(self.originals, self.snapshot())
         self.assertEqual(loop._model_digest(trainer.model), loop._model_digest(trainer.champion))
 
-    def test_tied_and_lower_averages_do_not_replace_champion(self):
+    def test_unused_archive_results_cannot_veto_current_champion_gate(self):
         for wins in ((51, 61), (50, 61)):
             trainer = self.trainer()
             before = loop._model_digest(trainer.champion)
             metrics, _ = self.run_cycle(trainer, [result(22, 40), result(52), result(60),
                                                 result(wins[0]), result(wins[1])])
-            self.assertFalse(metrics["promoted"])
-            self.assertEqual(loop._model_digest(trainer.champion), before)
-            self.assertEqual(trainer.champion_version, 0)
+            self.assertTrue(metrics["promoted"])
+            self.assertEqual(loop._model_digest(trainer.champion), loop._model_digest(trainer.model))
+            self.assertEqual(trainer.champion_version, 1)
 
     def test_same_opponents_seeds_colors_and_search_options_for_both_actors(self):
         league = self.league()
@@ -136,7 +136,7 @@ class PromotionTest(unittest.TestCase):
         self.assertIs(calls[2].args[0], self.candidate)
         self.assertIs(calls[0].args[1], calls[2].args[1])
 
-    def test_unchanged_reference_cache_survives_save_and_resume(self):
+    def test_disabled_archive_survives_save_and_resume(self):
         trainer = self.trainer()
         self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
         path = self.root / "latest.pt"
@@ -144,9 +144,9 @@ class PromotionTest(unittest.TestCase):
         restored = Trainer.load_checkpoint(path)
         self.assertEqual(restored.promotion_league.state_dict(), trainer.promotion_league.state_dict())
         metrics, evaluate = self.run_cycle(restored, [result(22, 40)] + [result(50)] * 2)
-        self.assertEqual(evaluate.call_count, 3)
-        self.assertTrue(metrics["promotion_league"]["reference_cache_hit"])
-        self.assertEqual(metrics["promotion_league"]["actual_games_played"], 200)
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertIsNone(restored.promotion_league.reference_cache)
+        self.assertEqual(metrics["promotion_league"]["actual_games_played"], 0)
         self.assertEqual(self.originals, self.snapshot())
 
     def test_reference_weight_or_settings_changes_invalidate_cache(self):
@@ -165,40 +165,49 @@ class PromotionTest(unittest.TestCase):
                                        **OPTIONS)["reference_cache_hit"])
         self.assertEqual(evaluate.call_count, 4)
 
-    def test_archive_changes_or_missing_models_fail_before_learning(self):
+    def test_archive_changes_or_missing_models_do_not_block_learning(self):
         trainer = self.trainer()
         (self.archive / "champion_177v" / "best.pt").unlink()
-        with patch.object(loop, "collect_puct_game") as collect, self.assertRaises(OSError):
-            trainer.run_iteration()
-        collect.assert_not_called()
-        self.assertEqual(trainer.training_steps, 0)
+        metrics, evaluate = self.run_cycle(trainer, [result(22, 40)])
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertTrue(metrics["promoted"])
+        self.assertEqual(trainer.training_steps, 1)
         self.assertTrue(trainer._at_boundary)
 
-    def test_new_archive_versions_require_explicit_reconfigure(self):
+    def test_new_archive_versions_are_ignored_and_cannot_be_reactivated(self):
         trainer = self.trainer()
         folder = self.archive / "champion_128v"
         folder.mkdir()
         save_model(self.reference, folder / "best.pt")
-        with self.assertRaisesRegex(ValueError, "changed"):
-            trainer.run_iteration()
+        metrics, evaluate = self.run_cycle(trainer, [result(22, 40)])
+        self.assertTrue(metrics["promoted"])
+        self.assertEqual(evaluate.call_count, 1)
         trainer.reconfigure(promotion_archive_dir=str(self.archive))
-        self.assertEqual([row["version"] for row in trainer.promotion_league.opponents], [106, 128, 177])
+        self.assertIsNone(trainer.config.promotion_archive_dir)
+        self.assertEqual(trainer.promotion_league.opponents, [])
 
-    def test_explicit_refresh_loads_new_version_preserves_training_and_invalidates_cache(self):
+    def test_legacy_active_checkpoint_preserves_training_and_discards_archive_cache(self):
         trainer = self.trainer()
         self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
         source = self.root / "latest.pt"
         trainer.save_checkpoint(source)
-        original_bytes = source.read_bytes()
         old = torch.load(source, weights_only=True)
+        # Emulate the active archive fields/cache stored before retirement.
+        league = self.league()
+        league.compare(self.candidate, self.reference, evaluator=Mock(return_value=result(50)), **OPTIONS)
+        old["config"]["promotion_archive_dir"] = str(self.archive)
+        old["promotion_league"] = league.state_dict()
+        torch.save(old, source)
+        original_bytes = source.read_bytes()
         added = self.archive / "champion_185v"
         added.mkdir()
         save_model(self.reference, added / "best.pt")
         archive_snapshot = self.snapshot()
-        with self.assertRaises(ValueError):
-            Trainer.load_checkpoint(source)
-        restored = Trainer.load_checkpoint(source, refresh_promotion_archive=True)
-        self.assertEqual([row["version"] for row in restored.promotion_league.opponents], [106, 177, 185])
+        with patch.object(PromotionLeague, "_discover", side_effect=AssertionError("No archive reads")), \
+             patch("kingdom_ai.promotion.load_model", side_effect=AssertionError("No old model loads")), \
+             patch("kingdom_ai.promotion._file_digest", side_effect=AssertionError("No archive hashes")):
+            restored = Trainer.load_checkpoint(source)
+        self.assertEqual(restored.promotion_league.opponents, [])
         self.assertIsNone(restored.promotion_league.reference_cache)
         prepared = self.root / "refreshed.pt"
         restored.save_checkpoint(prepared)
@@ -221,33 +230,38 @@ class PromotionTest(unittest.TestCase):
             else:
                 self.assertEqual(left, right)
 
-        for key in old.keys() - {"promotion_league"}:
+        for key in old.keys() - {"promotion_league", "config"}:
             same(old[key], new[key])
+        for key in old["config"].keys() - {"promotion_archive_dir"}:
+            same(old["config"][key], new["config"][key])
+        self.assertIsNone(new["config"]["promotion_archive_dir"])
+        self.assertEqual(new["promotion_league"], {"version": 1, "opponents": [], "reference_cache": None})
         self.assertEqual(source.read_bytes(), original_bytes)
         self.assertEqual(self.snapshot(), archive_snapshot)
-        # The new pool requires fresh results for both actors, not an old 2-opponent mean.
+        # No old/new pool can require further games or veto the primary result.
         metrics, evaluate = self.run_cycle(restored, [result(22, 40)] + [result(50)] * 6)
-        self.assertEqual(evaluate.call_count, 7)
-        self.assertEqual(metrics["promotion_league"]["opponent_count"], 3)
-        self.assertEqual(metrics["promotion_league"]["actual_games_played"], 600)
-        self.assertFalse(metrics["promotion_league"]["reference_cache_hit"])
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertEqual(metrics["promotion_league"]["opponent_count"], 0)
+        self.assertEqual(metrics["promotion_league"]["actual_games_played"], 0)
 
-    def test_refresh_never_accepts_replaced_or_removed_pinned_opponents(self):
+    def test_removed_or_replaced_pinned_opponents_do_not_block_resume(self):
         trainer = self.trainer()
         source = self.root / "latest.pt"
         trainer.save_checkpoint(source)
+        state = torch.load(source, weights_only=True)
+        state["config"]["promotion_archive_dir"] = str(self.archive)
+        state["promotion_league"] = self.league().state_dict()
+        torch.save(state, source)
         added = self.archive / "champion_185v"
         added.mkdir()
         save_model(self.reference, added / "best.pt")
         old_path = self.archive / "champion_106v" / "best.pt"
         save_model(self.candidate, old_path)
-        with self.assertRaisesRegex(ValueError, "replaced"):
-            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        self.assertIsNone(Trainer.load_checkpoint(source).config.promotion_archive_dir)
         old_path.unlink()
-        with self.assertRaises(OSError):
-            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        self.assertIsNone(Trainer.load_checkpoint(source, refresh_promotion_archive=True).config.promotion_archive_dir)
 
-    def test_refresh_without_changes_preserves_valid_cache_and_requires_enabled_archive(self):
+    def test_legacy_refresh_argument_is_a_noop_but_keeps_strict_type_validation(self):
         trainer = self.trainer()
         self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
         source = self.root / "latest.pt"
@@ -258,8 +272,7 @@ class PromotionTest(unittest.TestCase):
             Trainer.load_checkpoint(source, refresh_promotion_archive=1)
         disabled = Trainer(TrainingConfig(), self.candidate)
         disabled.save_checkpoint(source)
-        with self.assertRaisesRegex(ValueError, "enabled"):
-            Trainer.load_checkpoint(source, refresh_promotion_archive=True)
+        self.assertIsNone(Trainer.load_checkpoint(source, refresh_promotion_archive=True).config.promotion_archive_dir)
 
     def test_empty_duplicate_or_incomplete_archive_is_not_silently_ignored(self):
         empty = self.root / "empty"
@@ -272,11 +285,17 @@ class PromotionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.league()
 
-    def test_failed_archive_comparison_never_promotes_or_saves_partial_iteration(self):
+    def test_archive_comparison_is_never_called_and_primary_failure_is_atomic(self):
         trainer = self.trainer()
         before = loop._model_digest(trainer.champion)
+        with patch.object(PromotionLeague, "compare", side_effect=AssertionError("No archive games")), \
+             patch.object(PromotionLeague, "check_unchanged", side_effect=AssertionError("No archive checks")):
+            metrics, evaluate = self.run_cycle(trainer, [result(22, 40)])
+        self.assertTrue(metrics["promoted"])
+        self.assertEqual(evaluate.call_count, 1)
+        trainer = self.trainer()
         with self.assertRaisesRegex(RuntimeError, "injected"):
-            self.run_cycle(trainer, [result(22, 40), result(50), RuntimeError("injected")])
+            self.run_cycle(trainer, [RuntimeError("injected")])
         self.assertEqual(loop._model_digest(trainer.champion), before)
         self.assertIsNone(trainer.promotion_league.reference_cache)
         with self.assertRaisesRegex(RuntimeError, "incomplete"):
@@ -314,16 +333,49 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual(loop._model_digest(restored.model), loop._model_digest(trainer.model))
         self.assertTrue(torch.equal(restored.generator.get_state(), trainer.generator.get_state()))
 
+    def test_active_v9_and_v10_resume_with_missing_archive_and_custom_threshold(self):
+        trainer = Trainer(TrainingConfig(promotion_threshold=0.6), self.candidate)
+        path = self.root / "legacy-active.pt"
+        trainer.save_checkpoint(path)
+        base = torch.load(path, weights_only=True)
+        league = self.league()
+        league.compare(self.candidate, self.reference, evaluator=Mock(return_value=result(50)), **OPTIONS)
+        for version in (9, 10):
+            with self.subTest(version=version):
+                payload = torch.load(path, weights_only=True) if version == 9 else base
+                payload["checkpoint_version"] = version
+                payload["config"]["promotion_archive_dir"] = str(self.root / "missing-archive")
+                payload["promotion_league"] = league.state_dict()
+                if version == 9:
+                    payload.pop("capture_defense_replay")
+                    for key in loop._CAPTURE_DEFENSE_CONFIG_KEYS:
+                        payload["config"].pop(key)
+                torch.save(payload, path)
+                original = path.read_bytes()
+                with patch.object(PromotionLeague, "_discover", side_effect=AssertionError("No discovery")), \
+                     patch("kingdom_ai.promotion.load_model", side_effect=AssertionError("No old models")), \
+                     patch("kingdom_ai.promotion._file_digest", side_effect=AssertionError("No hashing")):
+                    restored = Trainer.load_checkpoint(path, refresh_promotion_archive=True)
+                self.assertEqual(restored.config.promotion_threshold, 0.6)
+                self.assertIsNone(restored.config.promotion_archive_dir)
+                self.assertEqual(restored.promotion_league.state_dict(),
+                                 {"version": 1, "opponents": [], "reference_cache": None})
+                self.assertEqual(loop._model_digest(restored.model), loop._model_digest(trainer.model))
+                self.assertTrue(torch.equal(restored.generator.get_state(), trainer.generator.get_state()))
+                self.assertEqual(path.read_bytes(), original)
+
     def test_invalid_reconfigure_is_atomic_and_preparation_does_not_consume_rng(self):
         trainer = Trainer(TrainingConfig(), self.candidate)
         python_rng, cpu_rng = random.getstate(), torch.get_rng_state().clone()
         private_rng = trainer.generator.get_state().clone()
         original_config = trainer.config
-        with self.assertRaises(OSError):
-            trainer.reconfigure(promotion_archive_dir=str(self.root / "absent"))
+        with self.assertRaises(ValueError):
+            trainer.reconfigure(promotion_threshold=0.4)
         self.assertEqual(trainer.config, original_config)
         self.assertIsNone(trainer.promotion_league.directory)
+        trainer.reconfigure(promotion_archive_dir=str(self.root / "absent"))
         trainer.reconfigure(promotion_archive_dir=str(self.archive), promotion_threshold=0.55)
+        self.assertIsNone(trainer.config.promotion_archive_dir)
         self.assertEqual(python_rng, random.getstate())
         self.assertTrue(torch.equal(cpu_rng, torch.get_rng_state()))
         self.assertTrue(torch.equal(private_rng, trainer.generator.get_state()))
@@ -336,22 +388,22 @@ class PromotionTest(unittest.TestCase):
         self.assertEqual(metadata["source_checkpoint_version"], 10)
         self.assertEqual(metadata["weights_sha256"], loop._model_digest(trainer.model))
 
-    def test_compact_logs_and_analysis_keep_separate_primary_and_archive_results(self):
+    def test_compact_logs_and_analysis_report_zero_archive_games(self):
         trainer = self.trainer()
         first, _ = self.run_cycle(trainer, [result(21, 40)])
         second, _ = self.run_cycle(trainer, [result(22, 40)] + [result(50)] * 4)
         summary = summarize_metrics([compact_metric_row(first), compact_metric_row(second)])
         league = summary["promotion_league"]
-        self.assertEqual(league["enabled_iterations"], 2)
-        self.assertEqual(league["head_to_head_passes"], 1)
-        self.assertEqual(league["evaluated_iterations"], 1)
-        self.assertEqual(league["actual_games_played"], 400)
+        self.assertEqual(league["enabled_iterations"], 0)
+        self.assertEqual(league["head_to_head_passes"], 0)
+        self.assertEqual(league["evaluated_iterations"], 0)
+        self.assertEqual(league["actual_games_played"], 0)
         self.assertEqual(league["promotions"], 0)
-        self.assertEqual(league["latest_comparison"]["iteration"], 2)
-        self.assertEqual(league["latest_comparison"]["candidate_mean_win_rate"], 0.5)
+        self.assertIsNone(league["latest_comparison"])
+        self.assertEqual(summary["evaluation"]["promotions"], 1)
         self.assertEqual(summary["evaluation"]["games"], 80)
 
-    def test_actual_analysis_cli_reads_new_comparison_log_and_cache_counts(self):
+    def test_actual_analysis_cli_reports_only_primary_duels(self):
         trainer = self.trainer()
         metrics_path = self.root / "metrics.jsonl"
         def evaluate(*args, **kwargs):
@@ -366,10 +418,9 @@ class PromotionTest(unittest.TestCase):
         output = io.StringIO()
         with patch("sys.argv", ["analyze_training.py", str(metrics_path)]), redirect_stdout(output):
             self.assertEqual(program.main(), 0)
-        self.assertIn("1차 통과 2회", output.getvalue())
-        self.assertIn("실제 추가 대국 600판", output.getvalue())
-        self.assertIn("현 챔피언 결과 재사용 1회", output.getvalue())
-        self.assertIn("champion_106v: 후보 50.0%, 현 챔피언 50.0%", output.getvalue())
+        self.assertNotIn("과거 버전 승격 평가", output.getvalue())
+        self.assertNotIn("champion_106v", output.getvalue())
+        self.assertIn("승격 2/2", output.getvalue())
 
     def test_real_two_game_archive_duels_use_existing_cpp_batched_evaluator(self):
         # Only a tiny wiring smoke, not a 100-game strength experiment.

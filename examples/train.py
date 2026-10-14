@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--prepare-only", action="store_true",
                         help="모델·설정·버퍼를 저장하고 대국을 시작하지 않음")
     parser.add_argument("--refresh-promotion-archive", action="store_true",
-                        help="--resume --reconfigure로 새 과거 챔피언만 추가하고 평가 캐시 초기화")
+                        help="폐기된 과거 버전 평가 옵션; 호환용으로 받지만 무시")
     parser.add_argument("--device", default="cpu", help="cpu 또는 사용 가능한 cuda 장치")
     parser.add_argument("--self-play-backend", choices=("cpu", "cuda"),
                         help="자가 대국 규칙·탐색 장치 (기본 cpu); cuda는 --device cuda 필요")
@@ -81,9 +81,9 @@ def main():
     parser.add_argument("--threads", type=positive_integer, default=1,
                         help="이 실행의 PyTorch CPU 연산 스레드 수 (기본 1)")
     parser.add_argument("--promotion-archive-dir", type=str,
-                        help="1차 통과 후 비교할 champion_<버전>v/best.pt 폴더; 읽기 전용")
+                        help="폐기된 과거 버전 평가 옵션; 이 경로는 읽거나 수정하지 않음")
     parser.add_argument("--promotion-archive-games", type=positive_integer,
-                        help="후보와 현 챔피언이 각각 과거 버전마다 두는 판수 (새 학습 기본 100)")
+                        help="폐기된 과거 버전 평가 옵션; 호환용으로 받지만 무시")
     parser.add_argument("--evaluation-workers", type=positive_integer,
                         help="평가 병렬 worker 수; 새 학습 기본 1, 재개 시 저장값 복원")
     parser.add_argument("--evaluation-backend", choices=("legacy", "batched_cpp"),
@@ -122,13 +122,14 @@ def main():
     args = parser.parse_args()
     if any(part.casefold() == "past-version" for part in args.output.resolve().parts):
         parser.error("past-version은 읽기 전용입니다. 결과는 별도 --output 폴더에 저장하세요.")
-    config_names = set(asdict(TrainingConfig()))
+    config_names = set(asdict(TrainingConfig())) - {"promotion_archive_dir", "promotion_archive_games"}
     overrides = {name: getattr(args, name) for name in config_names
                  if getattr(args, name) is not None}
     if args.reconfigure and not args.resume:
         parser.error("--reconfigure에는 --resume이 필요합니다.")
-    if args.refresh_promotion_archive and not (args.resume and args.reconfigure):
-        parser.error("--refresh-promotion-archive에는 --resume --reconfigure와 새 --output이 필요합니다.")
+    if (args.refresh_promotion_archive or args.promotion_archive_dir is not None
+            or args.promotion_archive_games is not None):
+        print("과거 챔피언 비교는 제거되었습니다. 과거 평가 옵션은 무시합니다.", file=sys.stderr)
     if args.resume and (args.channels is not None or args.residual_blocks is not None):
         parser.error("재개 시 모델 구성을 변경할 수 없습니다.")
     if args.resume and overrides and not args.reconfigure:
@@ -159,7 +160,6 @@ def main():
                 evaluation_backend=args.evaluation_backend,
                 evaluation_leaf_batch_size=args.evaluation_leaf_batch_size,
                 evaluation_reuse_tree=args.evaluation_reuse_tree,
-                **({"refresh_promotion_archive": True} if args.refresh_promotion_archive else {}),
             )
             if args.reconfigure:
                 trainer.reconfigure(**overrides)
@@ -186,8 +186,11 @@ def main():
             )
     except (OSError, ValueError, RuntimeError, TypeError) as error:
         parser.error(str(error))
-    if (trainer.config.promotion_archive_dir is not None
-            and args.output.resolve().is_relative_to(Path(trainer.config.promotion_archive_dir))):
+    protected_archives = (args.promotion_archive_dir,
+                          getattr(trainer, "retired_promotion_archive_dir", None),
+                          trainer.config.promotion_archive_dir)
+    if any(directory is not None and args.output.resolve().is_relative_to(Path(directory).resolve())
+           for directory in protected_archives):
         parser.error("승격 평가 원본 폴더에는 결과를 저장할 수 없습니다. 별도 --output을 사용하세요.")
     print(
         f"시작: 완료 반복 {trainer.iteration}, 자가 대국 {trainer.self_play_games}판, "
@@ -202,12 +205,8 @@ def main():
               f"최대 {min(30, trainer.config.online_tactics_max_depth)}수 "
               "강제 승패 증명으로 검증하고 부정 정책만 학습합니다. "
               "GPU 자가 대국의 모든 착수에 30수 탐색을 추가하는 설정은 아닙니다.", flush=True)
-    if trainer.config.promotion_archive_dir is not None:
-        print(f"승격: 현 챔피언 상대 {trainer.config.promotion_threshold:.0%} 이상 → "
-              f"과거 버전마다 두 모델 각각 {trainer.config.promotion_archive_games}판 → "
-              "후보의 평균 승률이 더 높을 때만 교체 (동률 유지)", flush=True)
-        if args.refresh_promotion_archive:
-            print("과거 상대 목록을 갱신했습니다. 새 버전이 추가되면 기존 평가 캐시는 초기화됩니다.", flush=True)
+    print(f"승격: 현 챔피언 상대 {trainer.config.promotion_threshold:.0%} 이상이면 바로 교체 "
+          "(과거 버전 비교 없음)", flush=True)
 
     def report(row):
         trainer.export_champion(best)
@@ -238,19 +237,6 @@ def main():
             f"경과 {row['elapsed_with_checkpoint_seconds']:.2f}초", flush=True,
         )
         online_tactics = row.get("online_tactics", {})
-        league = row.get("promotion_league", {})
-        if league.get("evaluated", False):
-            print(f"과거 버전 비교: 후보 {league['candidate_mean_win_rate']:.1%}, "
-                  f"현 챔피언 {league['reference_mean_win_rate']:.1%}, "
-                  f"상대 {league['opponent_count']}개, 실제 추가 대국 {league['actual_games_played']}판, "
-                  f"현 챔피언 결과 재사용 {league['reference_cache_hit']}, "
-                  f"{league['seconds']:.2f}초", flush=True)
-            for result in league["results"]:
-                print(f"  champion_{result['version']}v: "
-                      f"후보 {result['candidate']['wins']}/{result['candidate']['games']} "
-                      f"({result['candidate']['win_rate']:.1%}), "
-                      f"현 챔피언 {result['reference']['wins']}/{result['reference']['games']} "
-                      f"({result['reference']['win_rate']:.1%})", flush=True)
         if online_tactics.get("enabled", False):
             print(
                 f"온라인 전술: 새 증명 {online_tactics['added_samples']}개, "

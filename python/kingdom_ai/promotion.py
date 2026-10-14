@@ -1,4 +1,4 @@
-"""Read-only historical opponents and a two-stage champion promotion gate."""
+"""Legacy read-only historical comparison helper, no longer a Trainer gate."""
 
 from __future__ import annotations
 

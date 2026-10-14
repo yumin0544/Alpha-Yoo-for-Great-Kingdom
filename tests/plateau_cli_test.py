@@ -238,7 +238,7 @@ class PlateauCLITest(unittest.TestCase):
         self.assertEqual((self.trainer.iteration, self.trainer.self_play_games), (575, 1177600))
         self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
 
-    def test_resume_forwards_fifty_five_percent_and_historical_pool_without_learning(self):
+    def test_resume_changes_primary_threshold_but_ignores_legacy_archive_flags(self):
         code, output, error, _ = self.invoke(
             "--resume", self.source, "--reconfigure", "--prepare-only",
             "--promotion-threshold", "0.55", "--promotion-archive-dir", self.path / "past-version",
@@ -246,8 +246,10 @@ class PlateauCLITest(unittest.TestCase):
         self.assertEqual(code, 0, error)
         self.assertEqual(self.trainer.config.promotion_threshold, 0.55)
         self.assertEqual(self.trainer.config.promotion_archive_games, 100)
-        self.assertEqual(self.trainer.config.promotion_archive_dir, str((self.path / "past-version").resolve()))
-        self.assertIn("동률 유지", output)
+        self.assertIsNone(self.trainer.config.promotion_archive_dir)
+        self.assertEqual(self.trainer.overrides, {"promotion_threshold": 0.55})
+        self.assertIn("과거 버전 비교 없음", output)
+        self.assertIn("과거 평가 옵션은 무시", error)
         self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
 
     def test_cli_never_writes_into_past_version(self):
@@ -258,25 +260,36 @@ class PlateauCLITest(unittest.TestCase):
         trainer_type.assert_not_called()
         self.assertFalse(protected.exists())
 
-    def test_explicit_archive_refresh_is_forwarded_only_in_a_separate_reconfigure_run(self):
+    def test_legacy_archive_refresh_is_not_forwarded(self):
         self.trainer.config = replace(self.trainer.config,
             promotion_archive_dir=str(self.path / "past-version"))
         saved_config = self.trainer.config
         code, output, error, trainer_type = self.invoke(
             "--resume", self.source, "--reconfigure", "--prepare-only", "--refresh-promotion-archive")
         self.assertEqual(code, 0, error)
-        self.assertTrue(trainer_type.load_checkpoint.call_args.kwargs["refresh_promotion_archive"])
+        self.assertNotIn("refresh_promotion_archive", trainer_type.load_checkpoint.call_args.kwargs)
         self.assertEqual(self.trainer.config, saved_config)
-        self.assertIn("상대 목록을 갱신", output)
+        self.assertIn("과거 평가 옵션은 무시", error)
+        self.assertNotIn("상대 목록을 갱신", output)
         self.assertFalse(any(event[0] == "run" for event in self.trainer.events))
 
-    def test_archive_refresh_requires_resume_and_explicit_reconfiguration(self):
-        for options in ((), ("--resume", self.source), ("--reconfigure",)):
+    def test_legacy_archive_flags_require_no_reconfiguration_to_be_ignored(self):
+        for options in ((), ("--resume", self.source)):
             with self.subTest(options=options):
-                code, _, error, trainer_type = self.invoke("--refresh-promotion-archive", *options)
-                self.assertEqual(code, 2)
-                self.assertIn("--resume", error)
-                trainer_type.assert_not_called()
+                code, _, error, trainer_type = self.invoke("--prepare-only", "--refresh-promotion-archive", *options)
+                self.assertEqual(code, 0, error)
+                self.assertIn("과거 평가 옵션은 무시", error)
+                self.assertNotIn("refresh_promotion_archive", trainer_type.load_checkpoint.call_args.kwargs
+                                 if trainer_type.load_checkpoint.called else {})
+
+    def test_retired_custom_archive_path_is_still_protected_from_output(self):
+        protected = self.path / "custom-archive"
+        self.trainer.retired_promotion_archive_dir = str(protected)
+        code, _, error, _ = self.invoke("--resume", self.source, "--prepare-only",
+                                      "--output", protected / "new-run")
+        self.assertEqual(code, 2)
+        self.assertIn("원본 폴더", error)
+        self.assertFalse(any(event[0] == "checkpoint" for event in self.trainer.events))
 
     def test_explicit_negative_loss_flag_restores_win_only_control(self):
         self.trainer.config = replace(self.trainer.config, online_tactics_include_loss=True)
